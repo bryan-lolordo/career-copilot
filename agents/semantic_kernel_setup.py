@@ -14,6 +14,7 @@ To modify:
 import asyncio
 import logging
 import os
+import time
 from dotenv import load_dotenv
 
 from semantic_kernel import Kernel
@@ -38,13 +39,19 @@ from agents.plugins.SelfImprovingMatchPlugin import SelfImprovingMatchPlugin
 from services.database_service import DatabaseService
 from services.conversation_memory import ConversationMemory
 
+# Observatory Integration
+from observatory_config import start_tracking_session, end_tracking_session, track_llm_call
+
 load_dotenv()
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # SYSTEM PROMPT - Single source of truth
 # ============================================================================
 SYSTEM_PROMPT = """
-You are Career Copilot — an AI assistant that helps users with job searches and résumé analysis.
+You are Career Copilot – an AI assistant that helps users with job searches and résumé analysis.
 
 ## 🎯 CONVERSATIONAL CAPABILITIES
 
@@ -332,9 +339,16 @@ async def main():
     """
     
     # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S',
+        force=True  # Override any existing logging config
+    )
+    
+    # Set up Semantic Kernel logging (but keep it quieter)
     setup_logging()
-    logging.getLogger("kernel").setLevel(logging.DEBUG)
-    logging.basicConfig(level=logging.DEBUG)
+    logging.getLogger("kernel").setLevel(logging.WARNING)
     
     # Create kernel with all plugins
     kernel, chat_completion, db_service, memory = create_kernel_with_plugins()
@@ -344,28 +358,82 @@ async def main():
     history = create_chat_history_with_system_prompt()
     
     # ✅ Startup confirmation
+    logger.info("Career Copilot CLI initialized successfully")
     print("\n🚀 Career Copilot initialized successfully.")
     print("Try saying: 'match my resume' or 'search for Python jobs'\n")
 
-    # 💬 Interactive chat loop
-    while True:
-        userInput = input("User > ").strip()
-        if userInput.lower() == "exit":
-            print("👋 Goodbye!")
-            break
+    # Start CLI session tracking
+    session = start_tracking_session("cli_session", metadata={"mode": "interactive"})
+    logger.info("Started Observatory tracking session")
+    
+    message_count = 0
 
-        # Add user message to history
-        history.add_user_message(userInput)
+    # 💬 Interactive chat loop
+    try:
+        while True:
+            userInput = input("User > ").strip()
+            if userInput.lower() == "exit":
+                logger.info("User requested exit")
+                print("👋 Goodbye!")
+                break
+
+            message_count += 1
+            logger.info(f"Processing message #{message_count}: '{userInput[:50]}...'")
+
+            # Add user message to history
+            history.add_user_message(userInput)
+            
+            # Track LLM call timing
+            start_time = time.time()
+            
+            # Let the AI handle the conversation and plugin calls
+            result = await chat_completion.get_chat_message_content(
+                chat_history=history,
+                settings=execution_settings,
+                kernel=kernel,
+            )
+            
+            # Calculate latency
+            latency_ms = (time.time() - start_time) * 1000
+            
+            # Extract token usage if available
+            prompt_tokens = 0
+            completion_tokens = 0
+            model_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4")
+            
+            if hasattr(result, 'metadata') and result.metadata:
+                usage = result.metadata.get('usage')
+                if usage:
+                    # usage is a CompletionUsage object, access attributes directly
+                    prompt_tokens = getattr(usage, 'prompt_tokens', 0)
+                    completion_tokens = getattr(usage, 'completion_tokens', 0)
+            
+            # Track in Observatory
+            track_llm_call(
+                model_name=model_name,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                operation="cli_chat_message",
+                metadata={"message_number": message_count},
+                prompt=userInput,
+                response_text=str(result)
+            )
+            
+            logger.info(f"LLM response received: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+            
+            print("Assistant >", str(result))
+            history.add_message(result)
         
-        # Let the AI handle the conversation and plugin calls
-        result = await chat_completion.get_chat_message_content(
-            chat_history=history,
-            settings=execution_settings,
-            kernel=kernel,
-        )
+        # End session successfully
+        end_tracking_session(session, success=True)
+        logger.info(f"CLI session ended successfully. Total messages: {message_count}")
         
-        print("Assistant >", str(result))
-        history.add_message(result)
+    except Exception as e:
+        # End session with error
+        end_tracking_session(session, success=False, error=str(e))
+        logger.error(f"CLI session ended with error: {e}")
+        raise
 
 
 # Run the main function when executed directly

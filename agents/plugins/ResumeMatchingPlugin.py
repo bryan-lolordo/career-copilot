@@ -3,6 +3,14 @@
 from semantic_kernel.functions import kernel_function
 from typing import Annotated
 import json
+import logging
+import time
+
+# Observatory Integration
+from observatory_config import start_tracking_session, end_tracking_session, track_llm_call
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 class ResumeMatchingPlugin:
@@ -201,146 +209,116 @@ class ResumeMatchingPlugin:
         return response + match_result
     
     async def _execute_filtered_matching(self, resume_id: int, job_ids: list) -> str:
-        """
-        Execute matching for specific jobs only.
-        """
-        # Get resume
-        resume = self.db.get_resume_by_id(resume_id)
-        if not resume:
-            return f"❌ Resume with ID {resume_id} not found."
+        """Execute matching for a specific resume against filtered jobs."""
+        # Start tracking the full matching session
+        session = start_tracking_session(
+            "resume_matching_workflow",
+            metadata={
+                "resume_id": resume_id,
+                "num_jobs": len(job_ids),
+                "operation": "filtered_matching"
+            }
+        )
+        logger.info(f"Starting resume matching: Resume #{resume_id} vs {len(job_ids)} jobs")
+        workflow_start_time = time.time()
         
-        resume_text = resume['text']
-        resume_name = resume['name']
-        
-        # Get filtered jobs
-        import sqlite3
-        from services.db import DB_PATH
-        
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        placeholders = ','.join('?' * len(job_ids))
-        cursor.execute(f"""
-            SELECT id, title, company, location, link, description
-            FROM jobs
-            WHERE id IN ({placeholders})
-        """, job_ids)
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        jobs = []
-        for row in rows:
-            jobs.append({
-                'id': row[0],
-                'title': row[1],
-                'company': row[2],
-                'location': row[3],
-                'link': row[4],
-                'description': row[5]
-            })
-        
-        if not jobs:
-            return "❌ No jobs found with the selected filter."
-        
-        # Update context
-        if self.memory:
-            self.memory.set_current_focus(resume_id=resume_id)
-            self.memory.update_context(last_action="resume_matching")
-        
-        print(f"\n🔍 PHASE 1: Quick scoring {len(jobs)} jobs for '{resume_name}'...\n")
-        
-        # Quick score all
-        quick_results = []
-        for i, job in enumerate(jobs, 1):
-            print(f"  Quick scoring job {i}/{len(jobs)}: {job.get('title', 'Unknown')}")
-            score_result = await self._quick_score_job_match(resume_text, job)
-            quick_results.append(score_result)
-        
-        # Sort and get top 5
-        quick_results.sort(key=lambda x: x['score'], reverse=True)
-        top_matches = quick_results[:min(2, len(quick_results))]
-        
-        print(f"\n🔬 PHASE 2: Deep analyzing top {len(top_matches)} matches...\n")
-        
-        # Deep analyze top 5
-        detailed_results = []
-        for i, match in enumerate(top_matches, 1):
-            print(f"  Deep analyzing {i}/{len(top_matches)}: {match['title']} (Score: {match['score']})")
-            
-            job = next((j for j in jobs if j.get('id') == match['job_id']), None)
-            if job:
-                detailed = await self._deep_analyze_job_match(resume_text, job, original_score=match['score'])
-                detailed_results.append(detailed)
-            else:
-                detailed_results.append(match)
-        
-        # Store in memory
-        if self.memory:
-            for result in detailed_results:
-                self.memory.add_match_result(result)
-            
-            if detailed_results:
-                self.memory.set_match_analysis(detailed_results[0])
-                self.memory.set_current_focus(job_id=detailed_results[0]['job_id'])
-        
-        # Save to database
         try:
-            from services.db import save_job_match
+            # Get resume
+            resume = self.db.get_resume_by_id(resume_id)
+            if not resume:
+                end_tracking_session(session, success=False, error="Resume not found")
+                return f"❌ Error: Resume with ID {resume_id} not found."
             
-            for result in quick_results:
-                try:
-                    save_job_match(
-                        resume_id=resume_id,
-                        job_id=result['job_id'],
-                        score=result['score'],
-                        confidence=result.get('confidence', 0.5),
-                        reason=json.dumps(result['reason']) if isinstance(result['reason'], list) else result['reason'],
-                        detailed_analysis=None
-                    )
-                except Exception as e:
-                    print(f"⚠️  Warning: Could not save match for job {result['job_id']}: {e}")
+            resume_text = resume.get('content', '')
+            resume_name = resume.get('name', 'Unknown Resume')
             
-            for detailed in detailed_results:
-                try:
-                    existing_match = next((m for m in quick_results if m['job_id'] == detailed['job_id']), None)
-                    
-                    save_job_match(
-                        resume_id=resume_id,
-                        job_id=detailed['job_id'],
-                        score=detailed['score'],
-                        confidence=detailed.get('confidence', 0.5),
-                        reason=json.dumps(existing_match['reason']) if existing_match and isinstance(existing_match['reason'], list) else json.dumps(detailed['reason']) if isinstance(detailed['reason'], list) else detailed['reason'],
-                        detailed_analysis=detailed.get('detailed_analysis')
-                    )
-                except Exception as e:
-                    print(f"⚠️  Warning: Could not save detailed match for job {detailed['job_id']}: {e}")
-                    
+            # Get jobs
+            jobs = []
+            for job_id in job_ids:
+                job = self.db.get_job_by_id(job_id)
+                if job:
+                    jobs.append(job)
+            
+            if not jobs:
+                end_tracking_session(session, success=False, error="No jobs found")
+                return "❌ No jobs found for matching."
+            
+            logger.info(f"Phase 1: Quick scoring {len(jobs)} jobs...")
+            quick_score_start = time.time()
+            
+            # PHASE 1: Quick scoring for ALL jobs
+            scored_jobs = []
+            for i, job in enumerate(jobs, 1):
+                logger.debug(f"Quick scoring job {i}/{len(jobs)}: {job.get('title', 'Unknown')}")
+                job_start_time = time.time()
+                
+                scored = await self._quick_score_job_match(resume_text, job)
+                scored_jobs.append(scored)
+                
+                job_latency = (time.time() - job_start_time) * 1000
+                logger.debug(f"  └─ Score: {scored['score']}/100, Latency: {job_latency:.0f}ms")
+            
+            quick_score_duration = time.time() - quick_score_start
+            logger.info(f"Phase 1 complete: {len(jobs)} jobs scored in {quick_score_duration:.1f}s")
+            
+            # Sort by score
+            scored_jobs.sort(key=lambda x: x['score'], reverse=True)
+            top_jobs = scored_jobs[:3]  # Top 3 for deep analysis
+            
+            logger.info(f"Phase 2: Deep analysis on top {len(top_jobs)} jobs...")
+            deep_analysis_start = time.time()
+            
+            # PHASE 2: Deep analysis for top matches
+            detailed_matches = []
+            for i, job in enumerate(top_jobs, 1):
+                logger.debug(f"Deep analysis {i}/{len(top_jobs)}: {job['title']}")
+                job_start_time = time.time()
+                
+                # Get full job details
+                full_job = self.db.get_job_by_id(job['job_id'])
+                detailed = await self._deep_analyze_job_match(resume_text, full_job, job['score'])
+                detailed_matches.append(detailed)
+                
+                job_latency = (time.time() - job_start_time) * 1000
+                logger.debug(f"  └─ Latency: {job_latency:.0f}ms")
+            
+            deep_analysis_duration = time.time() - deep_analysis_start
+            logger.info(f"Phase 2 complete: {len(top_jobs)} jobs analyzed in {deep_analysis_duration:.1f}s")
+            
+            # Save to database
+            for match in detailed_matches:
+                self.db.save_match(resume_id, match)
+            
+            # Calculate totals
+            total_duration = time.time() - workflow_start_time
+            logger.info(f"✅ Matching complete: {total_duration:.1f}s total ({quick_score_duration:.1f}s quick + {deep_analysis_duration:.1f}s deep)")
+            
+            # End session successfully
+            end_tracking_session(session, success=True)
+            
+            # Format response
+            response = f"✅ **Matching Complete!**\n\n"
+            response += f"📊 **Summary:**\n"
+            response += f"- Resume: {resume_name}\n"
+            response += f"- Jobs Analyzed: {len(jobs)}\n"
+            response += f"- Time Taken: {total_duration:.1f}s\n\n"
+            response += f"🎯 **Top Matches:**\n\n"
+            
+            for i, match in enumerate(detailed_matches, 1):
+                response += f"{i}. **{match['title']}** at {match['company']}\n"
+                response += f"   Score: {match['score']}/100\n"
+                if isinstance(match.get('reason'), list):
+                    response += f"   Key Points:\n"
+                    for reason in match['reason'][:2]:
+                        response += f"   • {reason}\n"
+                response += "\n"
+            
+            return response
+            
         except Exception as e:
-            print(f"⚠️  Warning: Error during database save: {e}")
-        
-        # Format response
-        response = f"✅ Analyzed {len(jobs)} jobs for **{resume_name}**\n\n"
-        response += f"🏆 Top {len(detailed_results)} matches:\n\n"
-        
-        for i, match in enumerate(detailed_results, 1):
-            response += f"{i}. **{match['title']}** at {match['company']} - {match['score']}% match\n"
-            response += f"   📍 {match['location']}\n"
-            response += f"   💡 {match.get('reason', 'No explanation available')}\n"
-            
-            if match.get('matched_skills'):
-                skills_preview = ', '.join(match['matched_skills'][:5])
-                response += f"   ✅ {skills_preview}\n"
-            if match.get('missing_skills'):
-                missing_preview = ', '.join(match['missing_skills'][:3])
-                response += f"   ⚠️  Missing: {missing_preview}\n"
-            
-            response += f"   🔗 {match['link']}\n\n"
-        
-        response += f"💾 Saved {len(quick_results)} match results to database.\n\n"
-        response += f"💬 Try: 'explain match #1' or 'why did I score {detailed_results[0]['score']}%?'"
-        
-        return response
+            logger.error(f"Error in matching workflow: {e}", exc_info=True)
+            end_tracking_session(session, success=False, error=str(e))
+            raise
 
     @kernel_function(
         name="explain_recent_match",
@@ -599,12 +577,37 @@ Company: {job.get('company', 'N/A')}
 Description: {job.get('description', 'N/A')[:1500]}"""
         
         try:
-            result = await self.kernel.invoke_prompt(prompt)
-            result_str = str(result).strip()
-
-            # ADD THIS
-            print(f"🔍 RAW LLM RESPONSE:\n{result_str[:500]}")  # First 500 chars
+            # Track this LLM call
+            llm_start_time = time.time()
             
+            result = await self.kernel.invoke_prompt(prompt)
+            
+            latency_ms = (time.time() - llm_start_time) * 1000
+            result_str = str(result).strip()
+            
+            # Estimate tokens (rough approximation: 1 token ≈ 4 chars)
+            prompt_tokens = len(prompt) // 4
+            completion_tokens = len(result_str) // 4
+            
+            # Track in Observatory
+            track_llm_call(
+                model_name="gpt-4",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                agent_name="ResumeMatching",
+                operation="quick_score_job",
+                metadata={
+                    "job_id": job.get('id'),
+                    "job_title": job.get('title', 'Unknown')
+                },
+                prompt=prompt,
+                response_text=result_str
+            )
+            
+            logger.debug(f"Quick score LLM call: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            
+            # Parse response (rest of the existing code stays the same)
             if '```json' in result_str:
                 result_str = result_str.split('```json')[1].split('```')[0].strip()
             elif '```' in result_str:
@@ -624,14 +627,14 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 'location': job.get('location', 'Unknown Location'),
                 'link': job.get('link', ''),
                 'score': int(match_data.get('score', 0)),
-                'confidence': float(match_data.get('confidence', 0.5)),  # ADD
-                'confidence_reasoning': match_data.get('confidence_reasoning', ''),  # ADD
-                'uncertainty_factors': match_data.get('uncertainty_factors', []),  # ADD
+                'confidence': float(match_data.get('confidence', 0.5)),
+                'confidence_reasoning': match_data.get('confidence_reasoning', ''),
+                'uncertainty_factors': match_data.get('uncertainty_factors', []),
                 'score_breakdown': match_data.get('score_breakdown', {}),
                 'reason': match_data.get('reason_bullets', ['No explanation provided.'])
             }
         except Exception as e:
-            print(f"Error in quick scoring: {e}")
+            logger.error(f"Error in quick scoring for job {job.get('title', 'Unknown')}: {e}")
             return {
                 'job_id': job.get('id'),
                 'title': job.get('title', 'Unknown Title'),
@@ -735,12 +738,38 @@ Company: {job.get('company', 'N/A')}
 Return 10 matched bullets with EXACT TEXT from both documents."""
         
         try:
-            result = await self.kernel.invoke_prompt(prompt)
-            result_str = str(result).strip()
-
-            # ADD THIS
-            print(f"🔍 RAW LLM RESPONSE:\n{result_str[:500]}")  # First 500 chars
+            # Track this LLM call
+            llm_start_time = time.time()
             
+            result = await self.kernel.invoke_prompt(prompt)
+            
+            latency_ms = (time.time() - llm_start_time) * 1000
+            result_str = str(result).strip()
+            
+            # Estimate tokens
+            prompt_tokens = len(prompt) // 4
+            completion_tokens = len(result_str) // 4
+            
+            # Track in Observatory
+            track_llm_call(
+                model_name="gpt-4",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                agent_name="ResumeMatching",
+                operation="deep_analyze_job",
+                metadata={
+                    "job_id": job.get('id'),
+                    "job_title": job.get('title', 'Unknown'),
+                    "original_score": original_score
+                },
+                prompt=prompt,
+                response_text=result_str
+            )
+            
+            logger.debug(f"Deep analysis LLM call: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            
+            # Parse response (rest of the existing code stays the same)
             if '```json' in result_str:
                 result_str = result_str.split('```json')[1].split('```')[0].strip()
             elif '```' in result_str:
@@ -761,11 +790,10 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 'link': job.get('link', ''),
                 'description': job.get('description', ''),
                 'score': original_score if original_score > 0 else int(match_data.get('overall_score', 0)),
-                'confidence': float(match_data.get('confidence', 0.5)),  # ADD
-                'confidence_reasoning': match_data.get('confidence_reasoning', ''),  # ADD
-                'uncertainty_factors': match_data.get('uncertainty_factors', []),  # ADD
+                'confidence': float(match_data.get('confidence', 0.5)),
+                'confidence_reasoning': match_data.get('confidence_reasoning', ''),
+                'uncertainty_factors': match_data.get('uncertainty_factors', []),
                 'reason': match_data.get('summary', 'No summary provided.'),
-                
                 'score_breakdown': match_data.get('score_breakdown', {}),
                 'matched_bullets': match_data.get('matched_bullets', []),
                 'matched_skills': match_data.get('matched_skills', []),
@@ -773,20 +801,11 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 'key_strengths': match_data.get('strengths', []),
                 'gaps': match_data.get('gaps', []),
                 'recommendation': match_data.get('improvement_suggestions', []),
-
-                
                 'detailed_analysis': json.dumps(match_data)
             }
             
         except Exception as e:
-            print(f"\n❌ DEEP ANALYSIS ERROR for '{job.get('title')}':")
-            print(f"   Error type: {type(e).__name__}")
-            print(f"   Error message: {e}")
-            
-            if 'result_str' in locals():
-                print(f"   Cleaned response preview: '{result_str[:300]}'")
-            
-            print(f"   Falling back to quick score for this job...")
+            logger.error(f"Deep analysis error for '{job.get('title', 'Unknown')}': {e}", exc_info=True)
             return {
                 'job_id': job.get('id'),
                 'title': job.get('title', 'Unknown Title'),
@@ -794,7 +813,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 'location': job.get('location', 'Unknown Location'),
                 'link': job.get('link', ''),
                 'score': original_score,
-                'confidence': 0.4,  # ADD - low confidence on error
+                'confidence': 0.4,
                 'reason': f"Match score: {original_score}/100 (detailed analysis unavailable)",
                 'matched_skills': [],
                 'missing_skills': [],

@@ -64,7 +64,7 @@ OBSERVATORY_DB_PATH = os.path.abspath(OBSERVATORY_DB_PATH)
 
 # Verify database exists
 if not os.path.exists(os.path.dirname(OBSERVATORY_DB_PATH)):
-    print(f"⚠️  WARNING: Observatory folder not found at expected location")
+    print(f"⚠️ WARNING: Observatory folder not found at expected location")
     print(f"   Expected: {os.path.dirname(OBSERVATORY_DB_PATH)}")
     print(f"   Current working directory: {os.getcwd()}")
     print(f"\n   Adjust OBSERVATORY_DB_PATH in observatory_config.py to point to your database")
@@ -93,16 +93,19 @@ def start_tracking_session(operation_type: str, metadata: dict = None):
     Start a tracking session for an operation.
     
     Args:
-        operation_type: Type of operation (e.g., "resume_matching", "chat_message", "job_search")
+        operation_type: Type of operation (e.g., "resume_matching", "chat_message", "code_review")
         metadata: Optional metadata to store with the session
     
     Returns:
         Session object (pass this to end_tracking_session)
+    
+    Example:
+        session = start_tracking_session("chat_message", {"user_id": "123"})
     """
-    return obs.start_session(
-        operation_type=operation_type,
-        metadata=metadata or {}
-    )
+    if metadata:
+        return obs.start_session(operation_type, **metadata)
+    else:
+        return obs.start_session(operation_type)
 
 
 def end_tracking_session(session, success: bool = True, error: str = None):
@@ -113,8 +116,20 @@ def end_tracking_session(session, success: bool = True, error: str = None):
         session: Session object from start_tracking_session
         success: Whether the operation succeeded
         error: Error message if operation failed
+    
+    Example:
+        end_tracking_session(session, success=True)
+        # or
+        end_tracking_session(session, success=False, error="API timeout")
     """
-    obs.end_session(session, success=success, error=error)
+    # Update session object before ending (Observatory.end_session doesn't accept these params)
+    if session:
+        if not success:
+            session.success = False
+        if error:
+            session.error = error
+    
+    obs.end_session(session)
 
 
 def track_llm_call(
@@ -124,10 +139,16 @@ def track_llm_call(
     latency_ms: float,
     agent_name: str = None,
     operation: str = None,
-    metadata: dict = None
+    metadata: dict = None,
+    # NEW: Enhanced fields for improved tracking
+    prompt: str = None,
+    response_text: str = None,
+    routing_decision = None,
+    cache_metadata = None,
+    quality_evaluation = None
 ):
     """
-    Record an LLM call in Observatory.
+    Record an LLM call in Observatory with enhanced tracking.
     
     Args:
         model_name: Name of the model (e.g., "gpt-4", "gpt-35-turbo")
@@ -137,16 +158,33 @@ def track_llm_call(
         agent_name: Name of the agent making the call (optional)
         operation: Type of operation (optional)
         metadata: Additional metadata (optional)
+        
+        # Enhanced fields (optional - auto-created if not provided)
+        prompt: Raw prompt text sent to LLM
+        response_text: Response text from LLM
+        routing_decision: RoutingDecision object (auto-created with defaults if None)
+        cache_metadata: CacheMetadata object (auto-created with defaults if None)
+        quality_evaluation: QualityEvaluation object (remains None if not provided)
+    
+    Note:
+        The enhanced collector automatically creates default routing and cache metadata
+        if not provided, so these fields are truly optional.
     """
     obs.record_call(
-        provider=ModelProvider.AZURE_OPENAI,  # Career Copilot uses Azure OpenAI
+        provider=ModelProvider.AZURE,  # Career Copilot uses Azure OpenAI
         model_name=model_name,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         latency_ms=latency_ms,
         agent_name=agent_name,
         operation=operation,
-        metadata=metadata or {}
+        metadata=metadata or {},
+        # Pass enhanced fields (will use defaults if None)
+        prompt=prompt,
+        response_text=response_text,
+        routing_decision=routing_decision,
+        cache_metadata=cache_metadata,
+        quality_evaluation=quality_evaluation
     )
 
 
