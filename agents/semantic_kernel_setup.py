@@ -5,8 +5,13 @@ Semantic Kernel Setup - Single Source of Truth
 This module is the MAIN configuration file for Career Copilot.
 Both CLI and Streamlit chatbot import from here.
 
+COMPREHENSIVE: Full Observatory Tier 2 metrics support
+- PromptBreakdown (auto-extracted)
+- PromptMetadata (version tracking)
+- QualityEvaluation (from LLM Judge)
+
 To modify:
-- System prompt → Edit SYSTEM_PROMPT below
+- System prompt → Edit SYSTEM_PROMPT below (and bump SYSTEM_PROMPT_VERSION!)
 - Plugin configuration → Edit create_kernel_with_plugins()
 - Execution settings → Edit create_execution_settings()
 """
@@ -40,12 +45,24 @@ from services.database_service import DatabaseService
 from services.conversation_memory import ConversationMemory
 
 # Observatory Integration
-from observatory_config import start_tracking_session, end_tracking_session, track_llm_call
+from observatory_config import (
+    start_tracking_session, 
+    end_tracking_session, 
+    track_llm_call,
+    create_prompt_metadata,
+    PromptMetadata
+)
+from llm_judge import maybe_judge_response
 
 load_dotenv()
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# SYSTEM PROMPT VERSION - BUMP THIS WHEN YOU CHANGE THE PROMPT!
+# ============================================================================
+SYSTEM_PROMPT_VERSION = "1.2.0"  # Semantic versioning: MAJOR.MINOR.PATCH
 
 # ============================================================================
 # SYSTEM PROMPT - Single source of truth
@@ -209,43 +226,19 @@ If they ask "why 87%?" later:
 - Use explain_recent_match (retrieves stored results)
 - NEVER call find_best_job_matches to re-match
 
-**CONTEXT REFERENCES:**
-- "this job"/"that job"/"the job" → currently active job_id
-- "my resume"/"this resume" → currently active resume_id
-- "the previous one"/"the last one" → recently viewed items
-- "job #2", "the second job" → 2nd job from last search
-- "match #3" → 3rd match from last matching results
-
-## 📝 EXAMPLES
-
-**Job Search & Exploration:**
-- "search for Python jobs" → find_jobs
-- "tell me about job #2" → get_job_details with job_number=2
-- "save all" → save_searched_jobs with job_numbers="all"
-- "save jobs 1 and 3" → save_searched_jobs with job_numbers="1,3"
-
-**Querying Saved Data:**
-- "show me all Deloitte jobs" → query_database_with_ai (queries saved jobs)
-- "find jobs created today" → query_database_with_ai (queries by date)
-- "show my top matches" → get_top_matches (sorted by score)
-- "show recent jobs" → get_recent_saved_jobs (sorted by date)
-
-**Resume Matching:**
-- "match my resume" → list_resumes (starts flow)
-  [user picks] → select_resume_for_matching
-  [user picks filter] → select_job_filter_for_matching
-- "why did I get 87%?" → explain_recent_match (retrieves from memory)
-- "show my matches" → show_saved_matches (retrieves from database)
-
-You should automatically call the appropriate plugin functions based on user intent and conversation context.
+## 📝 RESPONSE STYLE
+- Be concise but informative
+- Use markdown formatting for readability
+- For job lists, use numbered format
+- Always confirm actions: "I've saved 5 jobs to your database"
 """
 
 
 # ============================================================================
-# KERNEL FACTORY FUNCTIONS
+# KERNEL SETUP FUNCTION
 # ============================================================================
 
-def create_kernel_with_plugins(memory: ConversationMemory = None) -> tuple[Kernel, AzureChatCompletion, DatabaseService, ConversationMemory]:
+def create_kernel_with_plugins(memory: ConversationMemory = None):
     """
     Create and configure a kernel with all plugins registered.
     
@@ -328,6 +321,46 @@ def create_chat_history_with_system_prompt() -> ChatHistory:
 
 
 # ============================================================================
+# HELPER: Extract messages from ChatHistory for prompt breakdown
+# ============================================================================
+def extract_messages_from_history(chat_history) -> list:
+    """
+    Extract messages list from Semantic Kernel ChatHistory.
+    
+    Returns:
+        List of {"role": "system/user/assistant", "content": "..."} dicts
+    """
+    messages = []
+    for msg in chat_history.messages:
+        role = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
+        # Normalize role names
+        if role.lower() in ['system', 'developer']:
+            role = 'system'
+        elif role.lower() in ['user', 'human']:
+            role = 'user'
+        elif role.lower() in ['assistant', 'ai', 'bot']:
+            role = 'assistant'
+        
+        messages.append({
+            "role": role,
+            "content": str(msg.content)
+        })
+    return messages
+
+
+# ============================================================================
+# CLI PROMPT METADATA
+# ============================================================================
+CLI_PROMPT_META = create_prompt_metadata(
+    template_id="career_copilot_cli",
+    version=SYSTEM_PROMPT_VERSION,
+    compressible_sections=["AVAILABLE TOOLS", "CRITICAL DECISION RULES"],
+    optimization_flags={"auto_function_calling": True},
+    config_version="1.0"
+) if PromptMetadata else None
+
+
+# ============================================================================
 # CLI MAIN FUNCTION
 # ============================================================================
 
@@ -359,11 +392,16 @@ async def main():
     
     # ✅ Startup confirmation
     logger.info("Career Copilot CLI initialized successfully")
+    logger.info(f"System prompt version: {SYSTEM_PROMPT_VERSION}")
     print("\n🚀 Career Copilot initialized successfully.")
+    print(f"📋 System prompt version: {SYSTEM_PROMPT_VERSION}")
     print("Try saying: 'match my resume' or 'search for Python jobs'\n")
 
     # Start CLI session tracking
-    session = start_tracking_session("cli_session", metadata={"mode": "interactive"})
+    session = start_tracking_session("cli_session", metadata={
+        "mode": "interactive",
+        "system_prompt_version": SYSTEM_PROMPT_VERSION
+    })
     logger.info("Started Observatory tracking session")
     
     message_count = 0
@@ -399,30 +437,55 @@ async def main():
             # Extract token usage if available
             prompt_tokens = 0
             completion_tokens = 0
-            model_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4")
             
             if hasattr(result, 'metadata') and result.metadata:
                 usage = result.metadata.get('usage')
                 if usage:
-                    # usage is a CompletionUsage object, access attributes directly
                     prompt_tokens = getattr(usage, 'prompt_tokens', 0)
                     completion_tokens = getattr(usage, 'completion_tokens', 0)
             
-            # Track in Observatory
+            # Get response text
+            response_text = str(result)
+            
+            # Extract messages for prompt breakdown (BEFORE adding assistant response)
+            messages_for_breakdown = extract_messages_from_history(history)
+            
+            # LLM Judge evaluation (50% sampling)
+            quality_eval = await maybe_judge_response(
+                kernel,
+                "cli_chat_message",
+                userInput,
+                response_text,
+                context={"message_number": message_count}
+            )
+            
+            # Track in Observatory - SINGLE CALL with ALL data
             track_llm_call(
-                model_name=model_name,
+                # Core metrics (model auto-detected from env)
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
+                agent_name="ChatAgent",
                 operation="cli_chat_message",
-                metadata={"message_number": message_count},
-                prompt=userInput,
-                response_text=str(result)
+                
+                # Prompt analysis
+                messages=messages_for_breakdown,
+                response_text=response_text,
+                prompt_metadata=CLI_PROMPT_META,  # Track system prompt version
+                
+                # Quality evaluation
+                quality_evaluation=quality_eval,
+                
+                # Metadata
+                metadata={
+                    "message_number": message_count,
+                    "system_prompt_version": SYSTEM_PROMPT_VERSION
+                }
             )
             
             logger.info(f"LLM response received: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
             
-            print("Assistant >", str(result))
+            print("Assistant >", response_text)
             history.add_message(result)
         
         # End session successfully

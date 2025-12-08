@@ -1,10 +1,38 @@
 # agents/plugins/QueryDatabasePlugin.py
+"""
+Database Query Plugin - Career Copilot
+UPDATED: Complete Observatory Tier 2 metrics coverage
+"""
+
 import sqlite3
 import json
 import re
+import time
+import os
 from semantic_kernel.functions import kernel_function
 from typing import Annotated
 from services.db import DB_PATH
+
+# Observatory Integration - Updated imports
+from observatory_config import (
+    track_llm_call,
+    create_prompt_metadata,
+    PromptMetadata
+)
+
+# =============================================================================
+# PROMPT VERSIONING
+# =============================================================================
+SQL_GENERATION_PROMPT_VERSION = "1.0.0"
+
+# Create PromptMetadata for SQL generation operations
+SQL_PROMPT_META = create_prompt_metadata(
+    template_id="database_query_sql_generation",
+    version=SQL_GENERATION_PROMPT_VERSION,
+    compressible_sections=["RULES"],
+    optimization_flags={"deterministic_sql": True},
+    config_version="1.0"
+) if PromptMetadata else None
 
 
 class DatabaseQueryPlugin:
@@ -98,11 +126,8 @@ class DatabaseQueryPlugin:
         and returns the results.
         """
         
-        sql_generation_prompt = f"""You are a SQL expert. Given the following database schema and a user question, generate a safe SQL SELECT query.
-
-{self.schema}
-
-User Question: {question}
+        # Build the SQL generation prompt
+        system_prompt = """You are a SQL expert. Given a database schema and a user question, generate a safe SQL SELECT query.
 
 RULES:
 1. Generate ONLY a SELECT query (no modifications)
@@ -110,15 +135,57 @@ RULES:
 3. Use proper SQLite syntax
 4. Limit results to 50 rows maximum using LIMIT clause
 5. Do not use subqueries if possible
-6. Do not include markdown formatting or code blocks
+6. Do not include markdown formatting or code blocks"""
+
+        user_message = f"""{self.schema}
+
+User Question: {question}
 
 SQL Query:"""
 
+        full_prompt = f"{system_prompt}\n\n{user_message}"
+
         try:
             print(f"\n🤖 Generating SQL for question: '{question}'")
-            result = await self.kernel.invoke_prompt(sql_generation_prompt)
+            
+            # Track LLM call for SQL generation
+            llm_start_time = time.time()
+            
+            result = await self.kernel.invoke_prompt(full_prompt)
+            
+            latency_ms = (time.time() - llm_start_time) * 1000
             generated_sql = str(result).strip()
             
+            # Estimate tokens
+            prompt_tokens = len(full_prompt) // 4
+            completion_tokens = len(generated_sql) // 4
+            
+            # Track in Observatory - SINGLE CALL with all data
+            track_llm_call(
+                # Core metrics (model auto-detected from env)
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                agent_name="DatabaseQuery",
+                operation="generate_sql",
+                
+                # Prompt analysis
+                system_prompt=system_prompt,
+                user_message=user_message,
+                response_text=generated_sql,
+                prompt_metadata=SQL_PROMPT_META,
+                
+                # Metadata
+                metadata={
+                    "question": question[:200],
+                    "generated_sql": generated_sql[:300],
+                    "schema_length": len(self.schema)
+                }
+            )
+            
+            print(f"📊 Tracked SQL generation: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            
+            # Clean up generated SQL
             if "```sql" in generated_sql:
                 generated_sql = generated_sql.split("```sql")[1].split("```")[0].strip()
             elif "```" in generated_sql:
@@ -126,8 +193,9 @@ SQL Query:"""
             
             generated_sql = generated_sql.rstrip(";")
             
-            print(f"🔍 Generated SQL: {generated_sql}")
+            print(f"📝 Generated SQL: {generated_sql}")
             
+            # Validate query safety
             is_safe, safety_reason = self._is_safe_query(generated_sql)
             
             if not is_safe:
@@ -135,24 +203,22 @@ SQL Query:"""
             
             print(f"✅ Query validated as safe")
             
+            # Execute query
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             cursor.execute(generated_sql)
             rows = cursor.fetchall()
             
-            column_names = [description[0] for description in cursor.description]
+            if not rows:
+                conn.close()
+                return f"✅ Query executed successfully.\n\nNo results found for: {question}"
             
+            # Format results
+            column_names = [description[0] for description in cursor.description]
             conn.close()
             
-            if self.memory:
-                self.memory.set_query_results(rows)
-                self.memory.update_context(last_action="database_query")
-            
-            if not rows:
-                return f"🔭 No results found for: '{question}'"
-            
-            result_text = f"📊 Query Results ({len(rows)} rows):\n\n"
+            result_text = f"✅ Found {len(rows)} result(s):\n\n"
             result_text += " | ".join(column_names) + "\n"
             result_text += "-" * (len(" | ".join(column_names))) + "\n"
             

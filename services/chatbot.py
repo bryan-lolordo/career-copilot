@@ -1,13 +1,16 @@
 # services/chatbot.py
 """
-Streamlit Chatbot Service
+Streamlit Chatbot Service - Career Copilot
+COMPREHENSIVE: All Observatory Tier 2 metrics
 
-This module provides the chatbot interface for Streamlit.
-All kernel setup is imported from agents.semantic_kernel_setup (the main source of truth).
+Captures:
+- PromptBreakdown (auto-extracted from chat history)
+- PromptMetadata (system prompt versioning)
+- QualityEvaluation (from LLM Judge)
+- Full metadata tracking
 """
 
 import asyncio
-import json
 import logging
 import re
 import time
@@ -15,13 +18,20 @@ from agents.semantic_kernel_setup import (
     create_kernel_with_plugins,
     create_execution_settings,
     create_chat_history_with_system_prompt,
-    SYSTEM_PROMPT
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_VERSION,
+    extract_messages_from_history
 )
 from services.conversation_memory import ConversationMemory, get_memory_manager
 
 # Observatory Integration
-from observatory_config import start_tracking_session, end_tracking_session, track_llm_call
-import os
+from observatory_config import (
+    obs, 
+    track_llm_call,
+    create_prompt_metadata,
+    PromptMetadata
+)
+from llm_judge import maybe_judge_response
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -32,12 +42,23 @@ logging.basicConfig(
 )
 
 # ============================================================================
+# PROMPT METADATA CONFIGURATION
+# ============================================================================
+
+# Create PromptMetadata for system prompt tracking
+# Bump version when you change SYSTEM_PROMPT in semantic_kernel_setup.py
+PROMPT_META = create_prompt_metadata(
+    template_id="career_copilot_streamlit",
+    version=SYSTEM_PROMPT_VERSION,
+    compressible_sections=["AVAILABLE TOOLS", "CRITICAL DECISION RULES"],
+    optimization_flags={"auto_function_calling": True},
+    config_version="1.0"
+) if PromptMetadata else None
+
+
+# ============================================================================
 # GLOBAL KERNEL INITIALIZATION
 # ============================================================================
-# Initialize globally so it persists between Streamlit calls
-# This avoids recreating the kernel on every message
-
-# Get or create memory for this session
 memory_manager = get_memory_manager()
 memory = memory_manager.get_session("streamlit_default")
 
@@ -45,10 +66,14 @@ kernel, chat_completion, db_service, memory = create_kernel_with_plugins(memory)
 execution_settings = create_execution_settings()
 history = create_chat_history_with_system_prompt()
 
-# Quick access to context for backwards compatibility
 context = memory.context
 
-logger.info("Chatbot service initialized with Observatory tracking")
+# START GLOBAL OBSERVATORY SESSION (for the lifetime of this Streamlit app)
+obs_session = obs.start_session("streamlit_app_session")
+logger.info(f"Observatory session started: {obs_session.id}")
+
+logger.info("Chatbot service initialized with full Observatory tracking")
+logger.info(f"System prompt version: {SYSTEM_PROMPT_VERSION}")
 
 
 # ============================================================================
@@ -63,14 +88,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
 
     Returns:
         Tuple of (response_text, plugin_used)
-        - response_text: The chatbot's reply
-        - plugin_used: Name of plugin that was called (or None)
     """
-    # Start tracking this chat message
-    session = start_tracking_session(
-        "streamlit_chat_message",
-        metadata={"message_length": len(message)}
-    )
     logger.info(f"Processing Streamlit message: '{message[:50]}...'")
     
     start_time = time.time()
@@ -91,49 +109,56 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         logger.info(f"LLM response received: {latency_ms:.0f}ms")
 
         # Detect which plugin was used (if any)
-        plugin_used = None
-        if hasattr(response, "metadata") and response.metadata:
-            if "function_call" in response.metadata:
-                plugin_used = response.metadata["function_call"].get("name")
-
-        if not plugin_used and hasattr(response, "items"):
-            for item in getattr(response, "items", []):
-                if hasattr(item, "function_call") and item.function_call:
-                    plugin_used = item.function_call.name
-                    break
-
+        plugin_used = detect_plugin_used(response)
         if plugin_used:
             logger.info(f"Plugin triggered: {plugin_used}")
 
         # Extract token usage
-        prompt_tokens = 0
-        completion_tokens = 0
-        model_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4")
+        prompt_tokens, completion_tokens = extract_token_usage(response)
         
-        if hasattr(response, 'metadata') and response.metadata:
-            usage = response.metadata.get('usage')
-            if usage:
-                prompt_tokens = getattr(usage, 'prompt_tokens', 0)
-                completion_tokens = getattr(usage, 'completion_tokens', 0)
-        
-        # Get response text (needed for tracking)
+        # Get response text
         response_text = str(response)
         
-        # Track in Observatory with prompt and response
+        # Extract messages for prompt breakdown (BEFORE adding assistant response)
+        messages_for_breakdown = extract_messages_from_history(history)
+        
+        # LLM Judge evaluation (50% sampling)
+        quality_eval = await maybe_judge_response(
+            kernel,
+            "streamlit_chat",
+            message,
+            response_text,
+            context={
+                "plugin_used": plugin_used,
+                "conversation_turn": len(history.messages)
+            }
+        )
+        
+        # Track in Observatory - SINGLE CALL with ALL data
         track_llm_call(
-            model_name=model_name,
+            # Core metrics (model auto-detected from env)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name=plugin_used if plugin_used else "ChatAgent",
             operation="streamlit_chat",
+            
+            # Prompt analysis - auto-extracts breakdown from messages
+            messages=messages_for_breakdown,
+            response_text=response_text,
+            prompt_metadata=PROMPT_META,  # Track system prompt version
+            
+            # Quality evaluation (may be None if not sampled)
+            quality_evaluation=quality_eval,
+            
+            # Additional metadata
             metadata={
                 "plugin_used": plugin_used,
-                "message_length": len(message)
-            },
-            # NEW: Track prompt and response text
-            prompt=message,
-            response_text=response_text
+                "message_length": len(message),
+                "response_length": len(response_text),
+                "conversation_turn": len(history.messages),
+                "system_prompt_version": SYSTEM_PROMPT_VERSION,
+            }
         )
         
         total_tokens = prompt_tokens + completion_tokens
@@ -152,26 +177,65 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         total_time = time.time() - start_time
         logger.info(f"Chat message complete: {total_time:.2f}s total")
         
-        # End session successfully
-        end_tracking_session(session, success=True)
-        
         return response_text, plugin_used
         
     except Exception as e:
-        # End session with error
-        end_tracking_session(session, success=False, error=str(e))
         logger.error(f"Error in chat_with_kernel: {e}", exc_info=True)
+        
+        # Track failed call
+        track_llm_call(
+            prompt_tokens=0,
+            completion_tokens=0,
+            latency_ms=(time.time() - start_time) * 1000,
+            operation="streamlit_chat",
+            success=False,
+            error=str(e),
+            metadata={"message_length": len(message)}
+        )
+        
         raise
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def detect_plugin_used(response) -> str:
+    """Detect which plugin was triggered from the response."""
+    plugin_used = None
+    
+    if hasattr(response, "metadata") and response.metadata:
+        if "function_call" in response.metadata:
+            plugin_used = response.metadata["function_call"].get("name")
+
+    if not plugin_used and hasattr(response, "items"):
+        for item in getattr(response, "items", []):
+            if hasattr(item, "function_call") and item.function_call:
+                plugin_used = item.function_call.name
+                break
+    
+    return plugin_used
+
+
+def extract_token_usage(response) -> tuple[int, int]:
+    """Extract token usage from response metadata."""
+    prompt_tokens = 0
+    completion_tokens = 0
+    
+    if hasattr(response, 'metadata') and response.metadata:
+        usage = response.metadata.get('usage')
+        if usage:
+            prompt_tokens = getattr(usage, 'prompt_tokens', 0)
+            completion_tokens = getattr(usage, 'completion_tokens', 0)
+    
+    return prompt_tokens, completion_tokens
 
 
 # ============================================================================
 # HELPER: Reset conversation history
 # ============================================================================
 def reset_chat_history():
-    """
-    Reset the conversation history and memory.
-    Useful for starting a fresh conversation in Streamlit.
-    """
+    """Reset the conversation history and memory."""
     global history, memory
     logger.info("Resetting chat history and memory")
     
@@ -191,20 +255,13 @@ def reset_chat_history():
 # HELPER: Get conversation history
 # ============================================================================
 def get_chat_history() -> list[dict]:
-    """
-    Get the current conversation history.
-    
-    Returns:
-        List of message dictionaries with 'role' and 'content'
-    """
-    messages = []
-    for msg in history.messages:
-        messages.append({
-            "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role),
-            "content": str(msg.content)
-        })
-    return messages
+    """Get the current conversation history."""
+    return extract_messages_from_history(history)
 
+
+# ============================================================================
+# CHATBOT CLASS
+# ============================================================================
 
 class CareerCopilotChatbot:
     """Wrapper class for Streamlit compatibility"""
@@ -218,15 +275,25 @@ class CareerCopilotChatbot:
     
     def reset(self):
         reset_chat_history()
+    
+    def get_system_prompt_version(self) -> str:
+        return SYSTEM_PROMPT_VERSION
 
 
 # ============================================================================
-# HELPER: Get kernel and database service for other pages
+# ACCESSOR FUNCTIONS
 # ============================================================================
+
 def get_kernel():
     """Get the global kernel instance for reuse across pages."""
     return kernel
 
+
 def get_database_service():
     """Get the database service instance for reuse across pages."""
     return db_service
+
+
+def get_prompt_metadata():
+    """Get the current prompt metadata."""
+    return PROMPT_META

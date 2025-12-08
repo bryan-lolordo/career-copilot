@@ -1,8 +1,44 @@
 # agents/plugins/ResumeTailoringPlugin.py
+"""
+Resume Tailoring Plugin - Career Copilot
+UPDATED: Complete Observatory Tier 2 metrics coverage
+"""
 
 from semantic_kernel.functions import kernel_function
 from typing import Annotated
 import json
+import time
+
+# Observatory Integration - Updated imports
+from observatory_config import (
+    track_llm_call,
+    create_prompt_metadata,
+    PromptMetadata
+)
+from llm_judge import maybe_judge_response
+
+# =============================================================================
+# PROMPT VERSIONING
+# =============================================================================
+IMPROVE_BULLET_PROMPT_VERSION = "1.1.0"
+CHANGE_REPORT_PROMPT_VERSION = "1.0.0"
+
+# Create PromptMetadata for resume tailoring operations
+IMPROVE_BULLET_META = create_prompt_metadata(
+    template_id="resume_tailoring_improve_bullet",
+    version=IMPROVE_BULLET_PROMPT_VERSION,
+    compressible_sections=["Context", "Your Task"],
+    optimization_flags={"creative_task": True},
+    config_version="1.0"
+) if PromptMetadata else None
+
+CHANGE_REPORT_META = create_prompt_metadata(
+    template_id="resume_tailoring_change_report",
+    version=CHANGE_REPORT_PROMPT_VERSION,
+    compressible_sections=[],
+    optimization_flags={"formatting_task": True},
+    config_version="1.0"
+) if PromptMetadata else None
 
 
 class ResumeTailoringPlugin:
@@ -34,26 +70,23 @@ class ResumeTailoringPlugin:
         """
         Takes a user request and generates 3 improved resume bullet point variations
         that are tailored to the specific job requirements.
-        
-        Returns JSON with format:
-        {
-            "suggestions": [
-                {
-                    "version": 1,
-                    "bullet": "Improved bullet text",
-                    "explanation": "Why this works"
-                }
-            ],
-            "original_identified": "The original bullet being improved"
-        }
         """
         
-        # ====================================================================
-        # STEP 1: Build context-aware prompt
-        # ====================================================================
-        prompt = f"""You are an expert resume writer helping tailor a resume for a specific job.
+        # Build the prompt
+        system_prompt = """You are an expert resume writer helping tailor a resume for a specific job.
 
-**Context:**
+Your Task:
+Generate 3 improved resume bullet points that address the user's request. Each bullet should:
+1. Be tailored to the job requirements above
+2. Incorporate relevant skills from the "Missing Skills" list when appropriate
+3. Use strong action verbs (Architected, Spearheaded, Implemented, etc.)
+4. Include quantifiable metrics when possible (%, $, time saved, users served, etc.)
+5. Be concise (1-2 lines maximum)
+6. Sound natural and authentic to the candidate's experience
+
+CRITICAL: Return ONLY valid JSON. No markdown, no code blocks, no explanations outside the JSON."""
+
+        user_message = f"""**Context:**
 - Job Title: {job_title} at {company}
 - Matched Skills: {matched_skills if matched_skills else "Not specified"}
 - Missing Skills: {missing_skills if missing_skills else "None identified"}
@@ -67,17 +100,6 @@ class ResumeTailoringPlugin:
 
 **User's Request:**
 {user_request}
-
-**Your Task:**
-Generate 3 improved resume bullet points that address the user's request. Each bullet should:
-1. Be tailored to the job requirements above
-2. Incorporate relevant skills from the "Missing Skills" list when appropriate
-3. Use strong action verbs (Architected, Spearheaded, Implemented, etc.)
-4. Include quantifiable metrics when possible (%, $, time saved, users served, etc.)
-5. Be concise (1-2 lines maximum)
-6. Sound natural and authentic to the candidate's experience
-
-CRITICAL: Return ONLY valid JSON. No markdown, no code blocks, no explanations outside the JSON.
 
 Required JSON format:
 {{
@@ -101,17 +123,65 @@ Required JSON format:
   "original_identified": "The original bullet point from the resume that you're improving, or 'New bullet point' if creating from scratch"
 }}"""
 
+        full_prompt = f"{system_prompt}\n\n{user_message}"
+
         try:
-            # ================================================================
-            # STEP 2: Send prompt to LLM
-            # ================================================================
-            result = await self.kernel.invoke_prompt(prompt)
+            # Track LLM call
+            llm_start_time = time.time()
+            
+            result = await self.kernel.invoke_prompt(full_prompt)
+            
+            latency_ms = (time.time() - llm_start_time) * 1000
             result_str = str(result).strip()
             
-            # ================================================================
-            # STEP 3: Clean up response - extract JSON
-            # ================================================================
-            # Remove markdown code blocks if present
+            # Estimate tokens
+            prompt_tokens = len(full_prompt) // 4
+            completion_tokens = len(result_str) // 4
+            
+            # LLM Judge evaluation (50% sampling) - get this BEFORE tracking
+            quality_eval = await maybe_judge_response(
+                self.kernel,
+                "improve_bullet",
+                full_prompt,
+                result_str,
+                context={
+                    "job_title": job_title,
+                    "company": company
+                }
+            )
+            
+            # Track in Observatory - SINGLE CALL with all data
+            track_llm_call(
+                # Core metrics (model auto-detected from env)
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                agent_name="ResumeTailoring",
+                operation="improve_bullet",
+                
+                # Prompt analysis
+                system_prompt=system_prompt,
+                user_message=user_message,
+                response_text=result_str,
+                prompt_metadata=IMPROVE_BULLET_META,
+                
+                # Quality evaluation (may be None if not sampled)
+                quality_evaluation=quality_eval,
+                
+                # Metadata
+                metadata={
+                    "job_title": job_title,
+                    "company": company,
+                    "user_request": user_request[:100],
+                    "has_matched_skills": bool(matched_skills),
+                    "has_missing_skills": bool(missing_skills),
+                    "judged": quality_eval is not None
+                }
+            )
+            
+            print(f"📊 Tracked resume tailoring: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            
+            # Clean up response - extract JSON
             if '```json' in result_str:
                 result_str = result_str.split('```json')[1].split('```')[0].strip()
             elif '```' in result_str:
@@ -123,18 +193,14 @@ Required JSON format:
             if start_idx != -1 and end_idx != -1:
                 result_str = result_str[start_idx:end_idx+1]
             
-            # ================================================================
-            # STEP 4: Parse and validate JSON
-            # ================================================================
+            # Parse and validate JSON
             suggestions_data = json.loads(result_str)
             
             # Validate structure
             if 'suggestions' not in suggestions_data:
                 raise ValueError("Response missing 'suggestions' field")
             
-            # ================================================================
-            # NEW: Store suggestions in memory for "apply #2" commands
-            # ================================================================
+            # Store suggestions in memory for "apply #2" commands
             if self.memory:
                 self.memory.set_tailoring_suggestions(suggestions_data)
                 self.memory.update_context(last_action="resume_tailoring")
@@ -143,13 +209,9 @@ Required JSON format:
             return json.dumps(suggestions_data, indent=2)
             
         except json.JSONDecodeError as e:
-            # ================================================================
-            # ERROR HANDLING: JSON parsing failed
-            # ================================================================
             print(f"❌ JSON parsing error: {e}")
             print(f"Raw response: {result_str[:500]}")
             
-            # Return error response in valid JSON format
             return json.dumps({
                 "error": "Failed to parse AI response",
                 "suggestions": [],
@@ -157,9 +219,6 @@ Required JSON format:
             })
         
         except Exception as e:
-            # ================================================================
-            # ERROR HANDLING: Other errors
-            # ================================================================
             print(f"❌ Error generating suggestions: {type(e).__name__}: {e}")
             
             return json.dumps({

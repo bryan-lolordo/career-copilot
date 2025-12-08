@@ -361,11 +361,12 @@ career_copilot/
 │
 ├── services/
 │   ├── chatbot.py                       # Main agent orchestration
+│   ├── enhanced_chatbot.py              # Advanced conversational agent
 │   ├── conversation_memory.py           # Conversation state management
 │   ├── database_service.py              # Data access layer
-│   ├── db.py                           # SQLite operations
-│   ├── job_api.py                      # SerpAPI integration
-│   └── resume_parser.py                # Document parsing
+│   ├── db.py                            # SQLite operations
+│   ├── job_api.py                       # SerpAPI integration
+│   └── resume_parser.py                 # Document parsing
 │
 ├── pages/                               # Streamlit multi-page UI
 │   ├── 1_💬_Chatbot.py

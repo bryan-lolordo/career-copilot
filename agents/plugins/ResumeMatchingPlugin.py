@@ -8,6 +8,9 @@ import time
 
 # Observatory Integration
 from observatory_config import start_tracking_session, end_tracking_session, track_llm_call
+from observatory_config import RoutingDecision, CacheMetadata
+from llm_judge import maybe_judge_response
+import os
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -287,7 +290,13 @@ class ResumeMatchingPlugin:
             
             # Save to database
             for match in detailed_matches:
-                self.db.save_match(resume_id, match)
+                self.db.save_match(
+                    resume_id=resume_id,
+                    job_id=match['job_id'],
+                    score=match['score'],
+                    reason=match['reason'],
+                    detailed_analysis=match.get('detailed_analysis')
+                )
             
             # Calculate totals
             total_duration = time.time() - workflow_start_time
@@ -589,14 +598,32 @@ Description: {job.get('description', 'N/A')[:1500]}"""
             prompt_tokens = len(prompt) // 4
             completion_tokens = len(result_str) // 4
             
+            # Create routing decision
+            routing = RoutingDecision(
+                chosen_model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
+                alternative_models=["gpt-4o", "gpt-4"],
+                reasoning="Quick scoring - efficient model sufficient",
+                complexity_score=0.4,
+                estimated_savings=0.026
+            )
+            
+            # Create cache metadata
+            cache = CacheMetadata(
+                cache_hit=False,
+                cache_key=None,
+                cache_cluster_id="resume_job_matching"
+            )
+            
             # Track in Observatory
             track_llm_call(
-                model_name="gpt-4",
+                model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
                 agent_name="ResumeMatching",
                 operation="quick_score_job",
+                routing_decision=routing,
+                cache_metadata=cache,
                 metadata={
                     "job_id": job.get('id'),
                     "job_title": job.get('title', 'Unknown')
@@ -750,14 +777,32 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
             prompt_tokens = len(prompt) // 4
             completion_tokens = len(result_str) // 4
             
+            # Create routing decision
+            routing = RoutingDecision(
+                chosen_model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
+                alternative_models=["gpt-4o", "gpt-4"],
+                reasoning="Deep analysis - complex reasoning task",
+                complexity_score=0.7,
+                estimated_savings=0.010
+            )
+            
+            # Create cache metadata
+            cache = CacheMetadata(
+                cache_hit=False,
+                cache_key=None,
+                cache_cluster_id="resume_job_deep_analysis"
+            )
+            
             # Track in Observatory
             track_llm_call(
-                model_name="gpt-4",
+                model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
                 agent_name="ResumeMatching",
                 operation="deep_analyze_job",
+                routing_decision=routing,
+                cache_metadata=cache,
                 metadata={
                     "job_id": job.get('id'),
                     "job_title": job.get('title', 'Unknown'),
@@ -768,6 +813,35 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
             )
             
             logger.debug(f"Deep analysis LLM call: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            
+            # NEW: LLM Judge evaluation (50% sampling)
+            quality_eval = await maybe_judge_response(
+                self.kernel,
+                "deep_analyze_job",
+                prompt,
+                result_str
+            )
+            
+            # If judged, track again with quality
+            if quality_eval:
+                track_llm_call(
+                    model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    latency_ms=latency_ms,
+                    agent_name="ResumeMatching",
+                    operation="deep_analyze_job",
+                    routing_decision=routing,
+                    cache_metadata=cache,
+                    metadata={
+                        "job_id": job.get('id'),
+                        "job_title": job.get('title', 'Unknown'),
+                        "original_score": original_score
+                    },
+                    prompt=prompt,
+                    response_text=result_str,
+                    quality_evaluation=quality_eval  # ← Add quality
+                )
             
             # Parse response (rest of the existing code stays the same)
             if '```json' in result_str:
