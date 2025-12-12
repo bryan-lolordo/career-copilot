@@ -1,567 +1,387 @@
 """
 Observatory Configuration - Career Copilot
-COMPREHENSIVE: All Tier 2 metrics with full model support
+Location: career-copilot/observatory_config.py
 
-Supports ALL new Observatory fields:
-- PromptBreakdown (auto-extracted from messages)
-- PromptMetadata (template versioning)
-- QualityEvaluation (all new fields)
-- RoutingDecision (routing_strategy field)
-- CacheMetadata (all new fields)
+This is the ONLY file needed in your application to use Observatory.
+All logic lives in the observatory package - this just configures it.
+
+Usage:
+    from observatory_config import obs, judge, cache, router, prompts, track_llm_call
+    
+    # In your plugin
+    quality = await judge.maybe_evaluate(operation, prompt, response, client)
+    track_llm_call(model, tokens, latency, operation=op, quality_evaluation=quality)
 """
 
 import os
-import sys
-import hashlib
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, List, Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # =============================================================================
-# MODEL CONFIGURATION (from .env)
+# IMPORT FROM OBSERVATORY SDK
 # =============================================================================
 
-DEFAULT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
-DEFAULT_PROVIDER = "AZURE"  # or "OPENAI" if using OpenAI directly
-
-print(f"📦 Observatory using model: {DEFAULT_MODEL}")
-
-# =============================================================================
-# OBSERVATORY IMPORTS
-# =============================================================================
-
-try:
-    from observatory import Observatory, ModelProvider, AgentRole
-    from observatory.models import (
-        RoutingDecision, 
-        CacheMetadata, 
-        QualityEvaluation,
-        PromptBreakdown,
-        PromptMetadata
-    )
-    FULL_MODELS_AVAILABLE = True
-    print("✅ Observatory package imported successfully (full models)")
-except ImportError as e:
-    print(f"⚠️ Full Observatory import failed: {e}")
-    # Try importing without new models for backward compatibility
-    try:
-        from observatory import Observatory, ModelProvider, AgentRole
-        from observatory.models import RoutingDecision, CacheMetadata, QualityEvaluation
-        PromptBreakdown = None
-        PromptMetadata = None
-        FULL_MODELS_AVAILABLE = False
-        print("⚠️ Observatory imported without PromptBreakdown/PromptMetadata (older version)")
-    except ImportError:
-        print("❌ ERROR: Cannot import Observatory package")
-        sys.exit(1)
-
-# =============================================================================
-# DATABASE CONFIGURATION
-# =============================================================================
-
-OBSERVATORY_DB_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "ai-agent-observatory",
-    "observatory.db"
+from observatory import (
+    # Core
+    Observatory,
+    ModelProvider,
+    AgentRole,
+    
+    # SDK Components
+    LLMJudge,
+    CacheManager,
+    ModelRouter,
+    PromptManager,
+    
+    # Convenience functions (rename to avoid conflict with our wrapper)
+    track_llm_call as _sdk_track_llm_call,
+    create_routing_decision,
+    create_cache_metadata,
+    create_quality_evaluation,
+    create_prompt_metadata,
+    create_prompt_breakdown,
+    estimate_tokens,
+    
+    # Models for type hints
+    RoutingDecision,
+    CacheMetadata,
+    QualityEvaluation,
+    PromptBreakdown,
+    PromptMetadata,
 )
-OBSERVATORY_DB_PATH = os.path.abspath(OBSERVATORY_DB_PATH)
 
-if not os.path.exists(os.path.dirname(OBSERVATORY_DB_PATH)):
-    print(f"⚠️ WARNING: Observatory folder not found at expected location")
-    print(f"   Expected: {os.path.dirname(OBSERVATORY_DB_PATH)}")
+# =============================================================================
+# PHASE CONFIGURATION
+# =============================================================================
 
-os.environ['DATABASE_URL'] = f"sqlite:///{OBSERVATORY_DB_PATH}"
+# Set via environment variable or .env file:
+#   OBSERVATORY_PHASE=baseline   (Phase 1: Track only, no optimizations)
+#   OBSERVATORY_PHASE=optimized  (Phase 2: Routing, caching, quality enabled)
+#
+# Or run with: OBSERVATORY_PHASE=optimized python your_app.py
+
+CURRENT_PHASE = os.getenv("OBSERVATORY_PHASE", "baseline")
+
+# Validate
+if CURRENT_PHASE not in ("baseline", "optimized"):
+    print(f"⚠️ Invalid OBSERVATORY_PHASE '{CURRENT_PHASE}', defaulting to 'baseline'")
+    CURRENT_PHASE = "baseline"
+
+# =============================================================================
+# PROJECT CONFIGURATION
+# =============================================================================
+
+PROJECT_NAME = "Career Copilot"
+DEFAULT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
+DEFAULT_PROVIDER = ModelProvider.AZURE
+
+# Database path - adjust to your Observatory location
+OBSERVATORY_DB_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "ai-agent-observatory", "observatory.db")
+)
+if 'DATABASE_URL' not in os.environ:
+    os.environ['DATABASE_URL'] = f"sqlite:///{OBSERVATORY_DB_PATH}"
+
+print(f"📦 Observatory Config: {PROJECT_NAME}")
+print(f"   Database: {OBSERVATORY_DB_PATH}")
+print(f"   Model: {DEFAULT_MODEL}")
+print(f"   Phase: {CURRENT_PHASE}")
 
 # =============================================================================
 # INITIALIZE OBSERVATORY
 # =============================================================================
 
 obs = Observatory(
-    project_name="Career Copilot",
-    enabled=True
+    project_name=PROJECT_NAME,
+    enabled=True,
 )
 
-print(f"✅ Observatory initialized for Career Copilot")
-print(f"   Database: {OBSERVATORY_DB_PATH}")
-print(f"   Project: Career Copilot")
-print(f"   Model: {DEFAULT_MODEL}")
-
-
 # =============================================================================
-# SESSION MANAGEMENT
+# CONFIGURE LLM JUDGE
 # =============================================================================
 
-def start_tracking_session(operation_type: str, metadata: dict = None):
-    """Start a tracking session for an operation."""
-    if metadata:
-        return obs.start_session(operation_type, **metadata)
-    else:
-        return obs.start_session(operation_type)
-
-
-def end_tracking_session(session, success: bool = True, error: str = None):
-    """End a tracking session."""
-    if session:
-        if not success:
-            session.success = False
-        if error:
-            session.error = error
-    obs.end_session(session)
-
+judge = LLMJudge(
+    observatory=obs,
+    
+    # Operations to evaluate
+    operations={
+        "improve_bullet",
+        "generate_change_report",
+        "deep_analyze_job",
+        "deep_analyze_with_guidance",
+        "critique_match",
+        "streamlit_chat",
+        "cli_chat_message",
+    },
+    
+    # Skip low-value operations
+    skip_operations={
+        "generate_sql",
+        "job_search",
+        "save_jobs",
+        "list_resumes",
+        "quick_score_job",
+    },
+    
+    # Evaluate 50% of judge-worthy calls
+    sample_rate=0.5,
+    
+    # Domain-specific criteria
+    criteria={
+        "relevance": 0.25,
+        "accuracy": 0.25,
+        "helpfulness": 0.25,
+        "professionalism": 0.15,
+        "clarity": 0.10,
+    },
+    
+    # Context for judge prompts
+    domain_context="career advice, resume optimization, and job matching",
+    
+    # Use same model as main app
+    judge_model=DEFAULT_MODEL,
+    
+    # Track judge calls in Observatory
+    track_judge_calls=True,
+)
 
 # =============================================================================
-# PROMPT BREAKDOWN HELPERS
+# CONFIGURE CACHE MANAGER
 # =============================================================================
 
-def estimate_tokens(text: str) -> int:
-    """Estimate tokens (rough: 4 chars ≈ 1 token)."""
-    if not text:
-        return 0
-    return len(text) // 4
+cache = CacheManager(
+    observatory=obs,
+    
+    # Operations to cache with TTL settings
+    operations={
+        "find_jobs": {"ttl": 3600, "normalize": True, "cluster_id": "job_searches"},
+        "query_database": {"ttl": 300, "normalize": True, "cluster_id": "db_queries"},
+        "get_job_details": {"ttl": 7200, "normalize": False, "cluster_id": "job_details"},
+        "list_resumes": {"ttl": 600, "normalize": False, "cluster_id": "resume_list"},
+    },
+    
+    # Defaults
+    default_ttl=3600,
+    max_entries=1000,
+    normalize_prompts=True,
+)
 
+# =============================================================================
+# CONFIGURE MODEL ROUTER
+# =============================================================================
 
-def create_prompt_breakdown(
-    system_prompt: str = None,
-    chat_history: list = None,
-    user_message: str = None,
-    response_text: str = None
-) -> Optional['PromptBreakdown']:
-    """
-    Create a PromptBreakdown object for tracking prompt components.
+router = ModelRouter(
+    observatory=obs,
+    default_model=DEFAULT_MODEL,
+    fallback_model="gpt-4o-mini",
     
-    Args:
-        system_prompt: The system prompt text
-        chat_history: List of {"role": "user/assistant", "content": "..."} dicts
-        user_message: The current user message
-        response_text: The LLM response text
-    
-    Returns:
-        PromptBreakdown object or None if not available
-    """
-    if PromptBreakdown is None:
-        return None
-    
-    def estimate_history_tokens(history: list) -> int:
-        if not history:
-            return 0
-        total = 0
-        for msg in history:
-            content = msg.get('content', '')
-            total += estimate_tokens(content)
-        return total
-    
-    return PromptBreakdown(
-        system_prompt=system_prompt[:2000] if system_prompt else None,
-        system_prompt_tokens=estimate_tokens(system_prompt),
-        chat_history=chat_history,
-        chat_history_tokens=estimate_history_tokens(chat_history),
-        chat_history_count=len(chat_history) if chat_history else 0,
-        user_message=user_message[:1000] if user_message else None,
-        user_message_tokens=estimate_tokens(user_message),
-        response_text=response_text[:2000] if response_text else None,
-    )
-
-
-def extract_prompt_breakdown_from_messages(messages: list, response_text: str = None) -> Optional['PromptBreakdown']:
-    """
-    Extract PromptBreakdown from a standard messages list.
-    
-    Args:
-        messages: List of {"role": "system/user/assistant", "content": "..."} dicts
-        response_text: The LLM response text
-    
-    Returns:
-        PromptBreakdown object
-    """
-    if PromptBreakdown is None:
-        return None
-    
-    system_prompt = None
-    chat_history = []
-    user_message = None
-    
-    for msg in messages:
-        role = msg.get('role', '')
-        content = msg.get('content', '')
+    # Routing rules (evaluated in order)
+    rules=[
+        # Simple retrieval operations → cheap model
+        {
+            "name": "simple_retrieval",
+            "operations": ["find_jobs", "list_resumes", "get_job_details", "get_saved_jobs"],
+            "model": "gpt-4o-mini",
+            "reason": "Simple retrieval - cheap model sufficient",
+        },
         
-        if role == 'system':
-            system_prompt = content
-        elif role == 'user':
-            # Last user message is the current one
-            if user_message:
-                chat_history.append({"role": "user", "content": user_message})
-            user_message = content
-        elif role == 'assistant':
-            chat_history.append({"role": "assistant", "content": content})
-    
-    return create_prompt_breakdown(
-        system_prompt=system_prompt,
-        chat_history=chat_history,
-        user_message=user_message,
-        response_text=response_text
-    )
-
-
-# =============================================================================
-# PROMPT METADATA HELPERS
-# =============================================================================
-
-def create_prompt_metadata(
-    template_id: str = None,
-    version: str = None,
-    compressible_sections: List[str] = None,
-    optimization_flags: Dict[str, bool] = None,
-    config_version: str = None
-) -> Optional['PromptMetadata']:
-    """
-    Create a PromptMetadata object for template versioning.
-    
-    Args:
-        template_id: Identifier for the prompt template (e.g., "career_copilot_system")
-        version: Version string (e.g., "1.0.0")
-        compressible_sections: List of section names that could be compressed
-        optimization_flags: Dict[str, bool] of optimization flags (e.g., {"fast_mode": True})
-        config_version: Overall config version
-    
-    Returns:
-        PromptMetadata object or None if not available
-    """
-    if PromptMetadata is None:
-        return None
-    
-    return PromptMetadata(
-        prompt_template_id=template_id,
-        prompt_version=version,
-        compressible_sections=compressible_sections,
-        optimization_flags=optimization_flags,
-        config_version=config_version,
-    )
-
+        # Database queries → cheap model
+        {
+            "name": "db_queries",
+            "operations": ["query_database", "generate_sql"],
+            "model": "gpt-4o-mini",
+            "reason": "SQL generation - structured output",
+        },
+        
+        # Complex analysis → premium model
+        {
+            "name": "complex_analysis",
+            "operations": ["deep_analyze_job", "deep_analyze_with_guidance", "critique_match"],
+            "model": "gpt-4o",
+            "reason": "Complex analysis requires premium model",
+        },
+        
+        # Self-improving operations → premium model
+        {
+            "name": "self_improving",
+            "operations": ["improve_bullet", "generate_change_report"],
+            "model": "gpt-4o",
+            "reason": "Quality-critical content generation",
+        },
+        
+        # High complexity → premium model
+        {
+            "name": "high_complexity",
+            "min_complexity": 0.7,
+            "model": "gpt-4o",
+            "reason": "High complexity score detected",
+        },
+        
+        # Low token count → cheap model
+        {
+            "name": "short_requests",
+            "max_tokens": 500,
+            "model": "gpt-4o-mini",
+            "reason": "Short request - cheap model sufficient",
+        },
+    ],
+)
 
 # =============================================================================
-# QUALITY EVALUATION HELPERS
+# CONFIGURE PROMPT MANAGER (A/B TESTING)
 # =============================================================================
 
-def create_quality_evaluation(
-    score: float,
-    reasoning: str = None,
-    hallucination: bool = False,
-    factual_error: bool = False,
-    failure_reason: str = None,
-    improvement_suggestion: str = None,
-    hallucination_details: str = None,
-    evidence_cited: bool = None,
-    confidence: float = 0.85,
-    judge_model: str = None,
-    criteria_scores: Dict[str, float] = None,
-    error_category: str = None
-) -> QualityEvaluation:
-    """
-    Create a QualityEvaluation object with ALL fields.
-    
-    Args:
-        score: Quality score 0-10
-        reasoning: Explanation for the score
-        hallucination: Whether hallucination was detected
-        factual_error: Whether factual error was detected
-        failure_reason: Category (HALLUCINATION, FACTUAL_ERROR, LOW_QUALITY, VERY_LOW_QUALITY)
-        improvement_suggestion: How to improve the response
-        hallucination_details: Specific details about what was hallucinated
-        evidence_cited: Whether the response cited sources/evidence
-        confidence: Judge's confidence in evaluation (0-1)
-        judge_model: Model used for judging
-        criteria_scores: Dict of individual criteria scores
-        error_category: Error category if any
-    
-    Returns:
-        QualityEvaluation object
-    """
-    # Determine failure_reason if not provided
-    if failure_reason is None:
-        if hallucination:
-            failure_reason = "HALLUCINATION"
-        elif factual_error:
-            failure_reason = "FACTUAL_ERROR"
-        elif score < 3:
-            failure_reason = "VERY_LOW_QUALITY"
-        elif score < 5:
-            failure_reason = "LOW_QUALITY"
-    
-    return QualityEvaluation(
-        judge_score=score,
-        judge_model=judge_model,
-        reasoning=reasoning,
-        hallucination_flag=hallucination,
-        confidence_score=confidence,
-        criteria_scores=criteria_scores,
-        error_category=error_category,
-        # Extended fields
-        failure_reason=failure_reason,
-        improvement_suggestion=improvement_suggestion,
-        hallucination_details=hallucination_details,
-        factual_error=factual_error,
-        evidence_cited=evidence_cited,
-    )
+prompts = PromptManager(observatory=obs)
 
+# Example: Register system prompt with variants
+# prompts.register(
+#     template_id="career_copilot_system",
+#     version="2.0.0",
+#     content=SYSTEM_PROMPT,  # Your main system prompt
+#     variants={
+#         "control": SYSTEM_PROMPT,
+#         "concise": CONCISE_SYSTEM_PROMPT,
+#         "structured": STRUCTURED_SYSTEM_PROMPT,
+#     },
+#     experiment_id="system_prompt_test_dec_2024",
+#     weights={"control": 0.5, "concise": 0.25, "structured": 0.25},
+#     description="Testing different system prompt styles",
+# )
 
 # =============================================================================
-# ROUTING DECISION HELPERS
-# =============================================================================
-
-def create_routing_decision(
-    chosen_model: str,
-    alternative_models: List[str] = None,
-    reasoning: str = None,
-    complexity_score: float = None,
-    rule_triggered: str = None,
-    estimated_cost_savings: float = None,
-    routing_strategy: str = None,
-    model_scores: Dict[str, float] = None
-) -> RoutingDecision:
-    """
-    Create a RoutingDecision object with ALL fields.
-    
-    Args:
-        chosen_model: The model that was selected
-        alternative_models: Other models that were considered
-        reasoning: Why this model was chosen
-        complexity_score: Estimated task complexity (0-1)
-        rule_triggered: Which routing rule was triggered
-        estimated_cost_savings: Estimated savings vs default model
-        routing_strategy: Strategy used ("cost_optimized", "quality_first", "balanced")
-        model_scores: Dict of model -> suitability scores
-    
-    Returns:
-        RoutingDecision object
-    """
-    return RoutingDecision(
-        chosen_model=chosen_model,
-        alternative_models=alternative_models or [],
-        reasoning=reasoning,
-        complexity_score=complexity_score,
-        rule_triggered=rule_triggered,
-        estimated_cost_savings=estimated_cost_savings,
-        routing_strategy=routing_strategy,
-        model_scores=model_scores,
-    )
-
-
-# =============================================================================
-# CACHE METADATA HELPERS
-# =============================================================================
-
-def create_cache_metadata(
-    cache_hit: bool,
-    cache_key: str = None,
-    cache_cluster_id: str = None,
-    similarity_score: float = None,
-    normalization_strategy: str = None,
-    eviction_info: str = None,
-    # New fields
-    cache_key_candidates: List[str] = None,
-    dynamic_fields: List[str] = None,
-    content_hash: str = None,
-    ttl_seconds: int = None
-) -> CacheMetadata:
-    """
-    Create a CacheMetadata object with ALL fields.
-    
-    Args:
-        cache_hit: Whether this was a cache hit
-        cache_key: The cache key used
-        cache_cluster_id: Cluster ID for semantic caching
-        similarity_score: Similarity to cached entry (0-1)
-        normalization_strategy: How the prompt was normalized
-        eviction_info: Info about cache eviction
-        cache_key_candidates: Alternative keys considered
-        dynamic_fields: Fields that were extracted/replaced
-        content_hash: Hash of the content for deduplication
-        ttl_seconds: Time-to-live for this cache entry
-    
-    Returns:
-        CacheMetadata object
-    """
-    return CacheMetadata(
-        cache_hit=cache_hit,
-        cache_key=cache_key,
-        cache_cluster_id=cache_cluster_id,
-        similarity_score=similarity_score,
-        normalization_strategy=normalization_strategy,
-        eviction_info=eviction_info,
-        cache_key_candidates=cache_key_candidates,
-        dynamic_fields=dynamic_fields,
-        content_hash=content_hash,
-        ttl_seconds=ttl_seconds,
-    )
-
-
-def compute_content_hash(content: str) -> str:
-    """Compute a hash for content deduplication."""
-    if not content:
-        return None
-    return hashlib.md5(content.encode()).hexdigest()[:16]
-
-
-# =============================================================================
-# MAIN TRACKING FUNCTION
+# WRAPPER: track_llm_call (matches SDK naming)
 # =============================================================================
 
 def track_llm_call(
-    model_name: str = None,  # Defaults to AZURE_OPENAI_DEPLOYMENT_NAME
+    # Core metrics
+    model_name: str = None,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     latency_ms: float = 0,
+    
+    # Context
     agent_name: str = None,
+    agent_role: str = None,
     operation: str = None,
-    metadata: dict = None,
-    prompt: str = None,
-    response_text: str = None,
-    # Tier 2: Routing & Cache
-    routing_decision: RoutingDecision = None,
-    cache_metadata: CacheMetadata = None,
-    # Tier 2: Quality Evaluation
-    quality_evaluation: QualityEvaluation = None,
-    # Tier 2: Prompt Analysis
-    prompt_breakdown: 'PromptBreakdown' = None,
-    prompt_metadata: 'PromptMetadata' = None,
-    # Auto-extraction options
-    messages: list = None,  # Auto-extract breakdown from messages
-    system_prompt: str = None,  # For manual breakdown
-    user_message: str = None,  # For manual breakdown
-    chat_history: list = None,  # For manual breakdown
-    # Flags
-    required_retry: bool = False,
+    
+    # Status
     success: bool = True,
     error: str = None,
+    
+    # Prompt content
+    prompt: str = None,
+    response_text: str = None,
+    prompt_normalized: str = None,
+    
+    # Separate prompt components
+    system_prompt: str = None,
+    user_message: str = None,
+    messages: List[Dict[str, str]] = None,
+    
+    # Optimization tracking
+    routing_decision: RoutingDecision = None,
+    cache_metadata: CacheMetadata = None,
+    quality_evaluation: QualityEvaluation = None,
+    
+    # Prompt analysis
+    prompt_breakdown: PromptBreakdown = None,
+    prompt_metadata: PromptMetadata = None,
+    
+    # A/B Testing
+    prompt_variant_id: str = None,
+    test_dataset_id: str = None,
+    
+    # Custom metadata
+    metadata: dict = None,
 ):
     """
-    Record an LLM call in Observatory with full Tier 2 metrics.
+    Track an LLM call with auto-filled defaults for Career Copilot.
     
-    Model name defaults to AZURE_OPENAI_DEPLOYMENT_NAME from .env
+    Uses default model and provider from config.
+    Passes all parameters through to SDK's track_llm_call.
     
     Args:
-        model_name: Name of the model (default: from env var)
-        prompt_tokens: Number of prompt tokens
-        completion_tokens: Number of completion tokens
-        latency_ms: Latency in milliseconds
-        agent_name: Name of the agent/plugin
-        operation: Operation type (e.g., "streamlit_chat", "improve_bullet")
-        metadata: Additional metadata dict
-        prompt: Full prompt text
-        response_text: LLM response text
-        routing_decision: RoutingDecision object
-        cache_metadata: CacheMetadata object
-        quality_evaluation: QualityEvaluation object
-        prompt_breakdown: PromptBreakdown object (or auto-extracted)
-        prompt_metadata: PromptMetadata object
-        messages: Messages list to auto-extract breakdown from
-        system_prompt: System prompt for manual breakdown
-        user_message: User message for manual breakdown
-        chat_history: Chat history for manual breakdown
-        required_retry: Whether this call needed a retry
-        success: Whether the call succeeded
+        model_name: Model used (defaults to DEFAULT_MODEL)
+        prompt_tokens: Input token count
+        completion_tokens: Output token count
+        latency_ms: Response time in ms
+        agent_name: Name of agent/plugin
+        agent_role: Role (analyst, reviewer, writer, retriever, planner, formatter, fixer, orchestrator, custom)
+        operation: Operation name
+        success: Whether call succeeded
         error: Error message if failed
+        prompt: Combined prompt text
+        response_text: Response from model
+        prompt_normalized: Normalized prompt for cache key generation
+        system_prompt: System prompt (tracked separately)
+        user_message: User message (tracked separately)
+        messages: Full conversation as [{role, content}, ...]
+        routing_decision: Routing metadata
+        cache_metadata: Cache metadata
+        quality_evaluation: Quality evaluation
+        prompt_breakdown: Prompt component breakdown
+        prompt_metadata: Prompt template metadata
+        prompt_variant_id: A/B test variant ID
+        test_dataset_id: Test dataset ID
+        metadata: Additional metadata dict
     
-    Example:
-        track_llm_call(
-            prompt_tokens=1500,
-            completion_tokens=300,
-            latency_ms=2500,
-            operation="streamlit_chat",
-            messages=chat_history,
-            response_text="Here's my advice...",
-            prompt_metadata=prompt_meta,
-            quality_evaluation=quality_eval
-        )
+    Returns:
+        LLMCall object
     """
-    # Use default model from env if not specified
-    if model_name is None:
-        model_name = DEFAULT_MODEL
+    # Convert string agent_role to AgentRole enum if provided
+    role_enum = None
+    if agent_role:
+        try:
+            role_enum = AgentRole(agent_role)
+        except ValueError:
+            # If not a valid enum value, store in metadata instead
+            if metadata is None:
+                metadata = {}
+            metadata['agent_role_str'] = agent_role
     
-    # Initialize metadata
-    enhanced_metadata = metadata.copy() if metadata else {}
-    
-    # Add prompt length metrics
-    if prompt:
-        enhanced_metadata['prompt_length_chars'] = len(prompt)
-    if response_text:
-        enhanced_metadata['response_length_chars'] = len(response_text)
-    if required_retry:
-        enhanced_metadata['required_retry'] = True
-    
-    # Auto-extract prompt breakdown if messages provided
-    if prompt_breakdown is None and messages:
-        prompt_breakdown = extract_prompt_breakdown_from_messages(messages, response_text)
-    
-    # Manual prompt breakdown if components provided
-    if prompt_breakdown is None and (system_prompt or user_message or chat_history):
-        prompt_breakdown = create_prompt_breakdown(
-            system_prompt=system_prompt,
-            chat_history=chat_history,
-            user_message=user_message,
-            response_text=response_text
-        )
-    
-    # Determine provider
-    provider = ModelProvider.AZURE if DEFAULT_PROVIDER == "AZURE" else ModelProvider.OPENAI
-    
-    # Build record_call kwargs
-    call_kwargs = {
-        'provider': provider,
-        'model_name': model_name,
-        'prompt_tokens': prompt_tokens,
-        'completion_tokens': completion_tokens,
-        'latency_ms': latency_ms,
-        'agent_name': agent_name,
-        'operation': operation,
-        'metadata': enhanced_metadata,
-        'prompt': prompt,
-        'response_text': response_text,
-        'routing_decision': routing_decision,
-        'cache_metadata': cache_metadata,
-        'quality_evaluation': quality_evaluation,
-        'success': success,
-        'error': error,
-    }
-    
-    # Add new fields if supported
-    if prompt_breakdown is not None:
-        call_kwargs['prompt_breakdown'] = prompt_breakdown
-    if prompt_metadata is not None:
-        call_kwargs['prompt_metadata'] = prompt_metadata
-    
-    # Record the call
-    session_started = False
-    try:
-        obs.record_call(**call_kwargs)
-    except ValueError as e:
-        if "No active session" in str(e):
-            # No session exists - create a temporary one
-            temp_session = obs.start_session("llm_call")
-            session_started = True
-            obs.record_call(**call_kwargs)
-            obs.end_session(temp_session)
-        else:
-            raise
+    return _sdk_track_llm_call(
+        observatory=obs,
+        model_name=model_name or DEFAULT_MODEL,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=max(latency_ms, 0.001),
+        provider=DEFAULT_PROVIDER,
+        agent_name=agent_name,
+        agent_role=role_enum,
+        operation=operation,
+        success=success,
+        error=error,
+        prompt=prompt,
+        response_text=response_text,
+        prompt_normalized=prompt_normalized,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        messages=messages,
+        routing_decision=routing_decision,
+        cache_metadata=cache_metadata,
+        quality_evaluation=quality_evaluation,
+        prompt_breakdown=prompt_breakdown,
+        prompt_metadata=prompt_metadata,
+        prompt_variant_id=prompt_variant_id,
+        test_dataset_id=test_dataset_id,
+        metadata=metadata,
+    )
 
 
 # =============================================================================
-# AGENT ROLE MAPPING
+# SESSION HELPERS
 # =============================================================================
 
-AGENT_ROLE_MAP = {
-    "ResumeMatching": AgentRole.ANALYST,
-    "JobPlugin": AgentRole.ANALYST,
-    "DatabaseQueryPlugin": AgentRole.ANALYST,
-    "ResumeTailoring": AgentRole.FIXER,
-    "SelfImprovingMatch": AgentRole.REVIEWER,
-    "ResumePreprocessor": AgentRole.ANALYST,
-    "JobPreprocessor": AgentRole.ANALYST,
-}
+def start_session(operation_type: str = None, **metadata):
+    """Start a tracking session."""
+    return obs.start_session(operation_type, **metadata)
 
 
-def get_agent_role(plugin_name: str) -> AgentRole:
-    """Get the appropriate AgentRole for a plugin."""
-    return AGENT_ROLE_MAP.get(plugin_name, AgentRole.ANALYST)
+def end_session(session, success: bool = True, error: str = None):
+    """End a tracking session."""
+    return obs.end_session(session, success=success, error=error)
 
 
 # =============================================================================
@@ -569,33 +389,37 @@ def get_agent_role(plugin_name: str) -> AgentRole:
 # =============================================================================
 
 __all__ = [
-    # Config
+    # Configured instances
+    'obs',
+    'judge',
+    'cache',
+    'router',
+    'prompts',
+    
+    # Config values
+    'PROJECT_NAME',
     'DEFAULT_MODEL',
     'DEFAULT_PROVIDER',
-    'FULL_MODELS_AVAILABLE',
-    # Observatory
-    'obs',
-    'Observatory',
-    'ModelProvider',
-    'AgentRole',
-    # Models
+    'CURRENT_PHASE',
+    
+    # Functions (SDK-matching names)
+    'track_llm_call',
+    'start_session',
+    'end_session',
+    
+    # Re-exported for convenience
+    'create_routing_decision',
+    'create_cache_metadata',
+    'create_quality_evaluation',
+    'create_prompt_metadata',
+    'create_prompt_breakdown',
+    'estimate_tokens',
+    
+    # Types for type hints
     'RoutingDecision',
     'CacheMetadata',
     'QualityEvaluation',
     'PromptBreakdown',
     'PromptMetadata',
-    # Session functions
-    'start_tracking_session',
-    'end_tracking_session',
-    'track_llm_call',
-    # Helper functions
-    'create_prompt_breakdown',
-    'extract_prompt_breakdown_from_messages',
-    'create_prompt_metadata',
-    'create_quality_evaluation',
-    'create_routing_decision',
-    'create_cache_metadata',
-    'compute_content_hash',
-    'estimate_tokens',
-    'get_agent_role',
+    'AgentRole',
 ]

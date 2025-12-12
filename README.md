@@ -356,8 +356,10 @@ career_copilot/
 │   │   ├── ResumeTailoringPlugin.py     # Resume optimization
 │   │   ├── SelfImprovingMatchPlugin.py  # Self-critique loops
 │   │   ├── ResumePreprocessorPlugin.py  # Resume text processing
-│   │   └── JobPreprocessorPlugin.py     # Job data cleaning
-│   └── semantic_kernel_setup.py         # Kernel configuration & CLI
+│   │   ├── JobPreprocessorPlugin.py     # Job data cleaning
+│   │   └── __init__.py
+│   ├── semantic_kernel_setup.py         # Kernel configuration & CLI
+│   └── __init__.py
 │
 ├── services/
 │   ├── chatbot.py                       # Main agent orchestration
@@ -366,7 +368,8 @@ career_copilot/
 │   ├── database_service.py              # Data access layer
 │   ├── db.py                            # SQLite operations
 │   ├── job_api.py                       # SerpAPI integration
-│   └── resume_parser.py                 # Document parsing
+│   ├── resume_parser.py                 # Document parsing
+│   └── __init__.py
 │
 ├── pages/                               # Streamlit multi-page UI
 │   ├── 1_💬_Chatbot.py
@@ -379,12 +382,44 @@ career_copilot/
 │
 ├── ui/                                  # Reusable UI components
 │   ├── components.py
-│   └── utils.py
+│   ├── utils.py
+│   └── __init__.py
 │
-├── streamlit_app.py                     # Web app entry point
+├── data/                                # Local data and database
+│   ├── Bryan LoLordo - AI Engineer.docx # Example resume
+│   └── career_copilot.db                # SQLite database
+│
+├── documents/                           # Project documents & templates
+│   └── career_copilot-search_service/
+│       ├── parameters.json
+│       └── template.json
+│
+├── pics/                                # Images and demo media
+│   ├── career_copilot.mp4
+│   ├── match_analysis.png
+│   ├── match_analysis_2.png
+│   ├── resume_matching.png
+│   └── resume_tailoring.png
+│
+├── tests/                               # Test suite
+│   ├── backup.py
+│   ├── prompt.py
+│   ├── smoke_test.py
+│   ├── test_baseline.py
+│   ├── test_career_copilot.py
+│   ├── test_career_copilot_custom.py
+│   ├── test_config.json
+│   └── __init__.py
+│
+├── .env                                 # Environment variables (not tracked)
 ├── ARCHITECTURE.md                      # Detailed architecture docs
+├── LICENSE
+├── llm_judge.py                         # LLM evaluation script
+├── observatory_config.py                # Observatory integration config
 ├── README.md
-└── requirements.txt
+├── requirements.txt
+├── streamlit_app.py                     # Web app entry point
+└── __pycache__/                         # Python bytecode cache (not tracked)
 ```
 
 ---

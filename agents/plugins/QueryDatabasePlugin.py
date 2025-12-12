@@ -1,24 +1,36 @@
 # agents/plugins/QueryDatabasePlugin.py
 """
 Database Query Plugin - Career Copilot
-UPDATED: Complete Observatory Tier 2 metrics coverage
+UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
 """
 
-import sqlite3
-import json
-import re
-import time
-import os
 from semantic_kernel.functions import kernel_function
 from typing import Annotated
+import json
+import logging
+import os
+import re
+import sqlite3
+import time
+
 from services.db import DB_PATH
 
-# Observatory Integration - Updated imports
+# Observatory Integration - Complete imports
 from observatory_config import (
+    start_session,
+    end_session,
     track_llm_call,
     create_prompt_metadata,
+    create_prompt_breakdown,
+    create_routing_decision,
+    create_cache_metadata,
+    judge,
+    DEFAULT_MODEL,
     PromptMetadata
 )
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # PROMPT VERSIONING
@@ -160,26 +172,72 @@ SQL Query:"""
             prompt_tokens = len(full_prompt) // 4
             completion_tokens = len(generated_sql) // 4
             
-            # Track in Observatory - SINGLE CALL with all data
+            # Create prompt breakdown for Tier 2
+            prompt_breakdown = create_prompt_breakdown(
+                system_prompt=system_prompt,
+                system_prompt_tokens=len(system_prompt) // 4,
+                user_message=user_message,
+                user_message_tokens=len(user_message) // 4,
+            ) if create_prompt_breakdown else None
+            
+            # LLM Judge evaluation (50% sampling) - Added for Tier 2
+            quality_eval = await judge.maybe_evaluate(
+                operation="generate_sql",
+                prompt=full_prompt,
+                response=generated_sql,
+                llm_client=self.kernel, 
+            )
+            
+            # Tier 3: Routing decision (placeholder - ready for optimization)
+            routing_decision = create_routing_decision(
+                chosen_model=DEFAULT_MODEL,  # Will be filled by observatory_config
+                alternative_models=["gpt-4o", "gpt-4o-mini"],
+                reasoning="SQL generation - deterministic task",
+                complexity_score=0.4
+            ) if create_routing_decision else None
+            
+            # Tier 3: Cache metadata (placeholder - ready for optimization)
+            cache_metadata = create_cache_metadata(
+                cache_hit=False,
+                cache_key=None,
+                cache_cluster_id="sql_generation"
+            ) if create_cache_metadata else None
+            
+            # Track in Observatory - COMPLETE with all tiers
             track_llm_call(
-                # Core metrics (model auto-detected from env)
+                # Core metrics (Tier 1)
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
                 agent_name="DatabaseQuery",
+                agent_role="analyst",  # Added: agent role
                 operation="generate_sql",
+                success=True,  # Added: explicit success
                 
-                # Prompt analysis
+                # Prompt analysis (Tier 2)
                 system_prompt=system_prompt,
                 user_message=user_message,
                 response_text=generated_sql,
                 prompt_metadata=SQL_PROMPT_META,
+                prompt_breakdown=prompt_breakdown,  # Added: token breakdown
+                
+                # Quality evaluation (Tier 2) - Added
+                quality_evaluation=quality_eval,
+                
+                # Optimization tracking (Tier 3)
+                routing_decision=routing_decision,  # Added: routing
+                cache_metadata=cache_metadata,  # Added: cache
+                
+                # A/B Testing support (Tier 3)
+                prompt_variant_id=None,  # Added: ready for A/B tests
+                test_dataset_id=None,  # Added: ready for test runs
                 
                 # Metadata
                 metadata={
                     "question": question[:200],
                     "generated_sql": generated_sql[:300],
-                    "schema_length": len(self.schema)
+                    "schema_length": len(self.schema),
+                    "judged": quality_eval is not None
                 }
             )
             
@@ -199,22 +257,18 @@ SQL Query:"""
             is_safe, safety_reason = self._is_safe_query(generated_sql)
             
             if not is_safe:
-                return f"❌ Query blocked for safety: {safety_reason}"
+                return f"❌ Cannot execute query: {safety_reason}"
             
-            print(f"✅ Query validated as safe")
-            
-            # Execute query
+            # Execute the query
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
             cursor.execute(generated_sql)
             rows = cursor.fetchall()
             
             if not rows:
                 conn.close()
-                return f"✅ Query executed successfully.\n\nNo results found for: {question}"
+                return "✅ Query executed successfully but returned no results."
             
-            # Format results
             column_names = [description[0] for description in cursor.description]
             conn.close()
             
@@ -237,9 +291,35 @@ SQL Query:"""
             return result_text
             
         except sqlite3.Error as e:
+            # Track database error
+            track_llm_call(
+                prompt_tokens=len(full_prompt) // 4 if 'full_prompt' in locals() else 0,
+                completion_tokens=len(generated_sql) // 4 if 'generated_sql' in locals() else 0,
+                latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
+                agent_name="DatabaseQuery",
+                agent_role="analyst",
+                operation="generate_sql",
+                success=False,
+                error=f"Database error: {str(e)}",
+                prompt_metadata=SQL_PROMPT_META,
+                metadata={"question": question[:200], "error_type": "sqlite_error"}
+            )
             return f"❌ Database error: {str(e)}\nGenerated SQL was: {generated_sql if 'generated_sql' in locals() else 'N/A'}"
             
         except Exception as e:
+            # Track general error
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
+                agent_name="DatabaseQuery",
+                agent_role="analyst",
+                operation="generate_sql",
+                success=False,
+                error=str(e),
+                prompt_metadata=SQL_PROMPT_META,
+                metadata={"question": question[:200], "error_type": "general_error"}
+            )
             return f"❌ Error processing query: {str(e)}"
     
     @kernel_function(
@@ -258,6 +338,8 @@ SQL Query:"""
         """
         Retrieve top job matches sorted by match score.
         """
+        start_time = time.time()
+        
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -295,32 +377,68 @@ SQL Query:"""
             conn.close()
             
             if not matches:
-                return f"❌ No matches found for '{resume_name}'.\n\nRun matching first: 'match my resume'"
-            
-            # Store in memory
-            if self.memory:
-                self.memory.set_current_focus(resume_id=int(resume_id))
-                for match in matches:
+                result = f"❌ No matches found for '{resume_name}'.\n\nRun matching first: 'match my resume'"
+            else:
+                # Store in memory
+                if self.memory:
+                    self.memory.set_current_focus(resume_id=int(resume_id))
+                    for match in matches:
+                        score, reason, job_id, title, company, location, link = match
+                        self.memory.add_match_result({
+                            'job_id': job_id, 'title': title, 'company': company,
+                            'location': location, 'link': link, 'score': score, 'reason': reason
+                        })
+                
+                # Format results
+                result = f"🎯 Top {len(matches)} Matches for '{resume_name}':\n\n"
+                
+                for i, match in enumerate(matches, 1):
                     score, reason, job_id, title, company, location, link = match
-                    self.memory.add_match_result({
-                        'job_id': job_id, 'title': title, 'company': company,
-                        'location': location, 'link': link, 'score': score, 'reason': reason
-                    })
+                    result += f"{i}. **{title}** at **{company}** - {score}% match\n"
+                    result += f"   📍 {location}\n"
+                    result += f"   🔗 {link}\n\n"
+                
+                result += "\nSay 'tell me about match #1' for details or 'explain match #2' for why you matched."
             
-            # Format results
-            result = f"🎯 Top {len(matches)} Matches for '{resume_name}':\n\n"
-            
-            for i, match in enumerate(matches, 1):
-                score, reason, job_id, title, company, location, link = match
-                result += f"{i}. **{title}** at **{company}** - {score}% match\n"
-                result += f"   📍 {location}\n"
-                result += f"   🔗 {link}\n\n"
-            
-            result += "\nSay 'tell me about match #1' for details or 'explain match #2' for why you matched."
+            # Track database read operation
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="DatabaseQuery",
+                agent_role="retriever",
+                operation="get_top_matches",
+                success=True,
+                prompt=f"Get top {limit} matches for resume {resume_id}",
+                response_text=result[:500],
+                routing_decision=None,
+                cache_metadata=None,
+                quality_evaluation=None,
+                prompt_variant_id=None,
+                test_dataset_id=None,
+                metadata={
+                    "resume_id": resume_id,
+                    "resume_name": resume_name if 'resume_name' in locals() else None,
+                    "limit": limit,
+                    "matches_returned": len(matches) if 'matches' in locals() else 0,
+                    "is_db_read": True
+                }
+            )
             
             return result
             
         except Exception as e:
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="DatabaseQuery",
+                agent_role="retriever",
+                operation="get_top_matches",
+                success=False,
+                error=str(e),
+                metadata={"resume_id": resume_id, "is_db_read": True}
+            )
             return f"❌ Error retrieving matches: {str(e)}"
     
     @kernel_function(
@@ -338,6 +456,8 @@ SQL Query:"""
         """
         Retrieve recently saved jobs sorted by creation date.
         """
+        start_time = time.time()
+        
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -353,20 +473,54 @@ SQL Query:"""
             conn.close()
             
             if not jobs:
-                return "❌ No saved jobs found in the database."
+                result = "❌ No saved jobs found in the database."
+            else:
+                result = f"📅 {len(jobs)} Most Recently Saved Jobs:\n\n"
+                
+                for i, job in enumerate(jobs, 1):
+                    job_id, title, company, location, link, created_at = job
+                    result += f"{i}. **{title}** at **{company}**\n"
+                    result += f"   📍 {location}\n"
+                    result += f"   📅 Saved: {created_at}\n"
+                    result += f"   🔗 {link}\n\n"
             
-            result = f"📅 {len(jobs)} Most Recently Saved Jobs:\n\n"
-            
-            for i, job in enumerate(jobs, 1):
-                job_id, title, company, location, link, created_at = job
-                result += f"{i}. **{title}** at **{company}**\n"
-                result += f"   📍 {location}\n"
-                result += f"   📅 Saved: {created_at}\n"
-                result += f"   🔗 {link}\n\n"
+            # Track database read operation
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="DatabaseQuery",
+                agent_role="retriever",
+                operation="get_recent_saved_jobs",
+                success=True,
+                prompt=f"Get recent {limit} saved jobs",
+                response_text=result[:500],
+                routing_decision=None,
+                cache_metadata=None,
+                quality_evaluation=None,
+                prompt_variant_id=None,
+                test_dataset_id=None,
+                metadata={
+                    "limit": limit,
+                    "jobs_returned": len(jobs) if 'jobs' in locals() else 0,
+                    "is_db_read": True
+                }
+            )
             
             return result
             
         except Exception as e:
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="DatabaseQuery",
+                agent_role="retriever",
+                operation="get_recent_saved_jobs",
+                success=False,
+                error=str(e),
+                metadata={"limit": limit, "is_db_read": True}
+            )
             return f"❌ Error retrieving recent jobs: {str(e)}"
 
     @kernel_function(
@@ -383,6 +537,8 @@ SQL Query:"""
     )
     async def get_database_stats(self) -> Annotated[str, "Database statistics"]:
         """Provides quick statistics about the database contents."""
+        start_time = time.time()
+        
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -412,7 +568,43 @@ SQL Query:"""
 🏢 Unique Companies: {company_count}
 📍 Unique Locations: {location_count}
 """
+            
+            # Track database read operation
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="DatabaseQuery",
+                agent_role="retriever",
+                operation="get_database_stats",
+                success=True,
+                prompt="Get database statistics",
+                response_text=stats,
+                routing_decision=None,
+                cache_metadata=None,
+                quality_evaluation=None,
+                prompt_variant_id=None,
+                test_dataset_id=None,
+                metadata={
+                    "resume_count": resume_count,
+                    "job_count": job_count,
+                    "match_count": match_count,
+                    "is_db_read": True
+                }
+            )
+            
             return stats
             
         except Exception as e:
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="DatabaseQuery",
+                agent_role="retriever",
+                operation="get_database_stats",
+                success=False,
+                error=str(e),
+                metadata={"is_db_read": True}
+            )
             return f"❌ Error retrieving stats: {str(e)}"

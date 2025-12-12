@@ -1,19 +1,21 @@
 # services/chatbot.py
 """
 Streamlit Chatbot Service - Career Copilot
-COMPREHENSIVE: All Observatory Tier 2 metrics
+COMPREHENSIVE: All Observatory Tier 1, 2, 3 metrics
 
 Captures:
-- PromptBreakdown (auto-extracted from chat history)
-- PromptMetadata (system prompt versioning)
-- QualityEvaluation (from LLM Judge)
-- Full metadata tracking
+- Tier 1: Core metrics (tokens, latency, cost)
+- Tier 2: PromptBreakdown, PromptMetadata, QualityEvaluation
+- Tier 3: RoutingDecision, CacheMetadata, A/B Testing support
 """
 
 import asyncio
+import json
 import logging
+import os
 import re
 import time
+
 from agents.semantic_kernel_setup import (
     create_kernel_with_plugins,
     create_execution_settings,
@@ -24,14 +26,20 @@ from agents.semantic_kernel_setup import (
 )
 from services.conversation_memory import ConversationMemory, get_memory_manager
 
-# Observatory Integration
+# Observatory Integration - Complete imports
 from observatory_config import (
-    obs, 
+    obs,
+    start_session,
+    end_session,
     track_llm_call,
     create_prompt_metadata,
+    create_prompt_breakdown,
+    create_routing_decision,
+    create_cache_metadata,
+    judge,
+    DEFAULT_MODEL,
     PromptMetadata
 )
-from llm_judge import maybe_judge_response
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -122,34 +130,59 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         # Extract messages for prompt breakdown (BEFORE adding assistant response)
         messages_for_breakdown = extract_messages_from_history(history)
         
+        # Create prompt breakdown for Tier 2
+        prompt_breakdown = create_prompt_breakdown_from_messages(messages_for_breakdown)
+        
         # LLM Judge evaluation (50% sampling)
-        quality_eval = await maybe_judge_response(
-            kernel,
-            "streamlit_chat",
-            message,
-            response_text,
-            context={
-                "plugin_used": plugin_used,
-                "conversation_turn": len(history.messages)
-            }
+        quality_eval = await judge.maybe_evaluate(
+            operation="streamlit_chat",
+            prompt=message,
+            response=response_text,
+            llm_client=self.kernel, 
         )
         
-        # Track in Observatory - SINGLE CALL with ALL data
+        # Tier 3: Routing decision (placeholder - ready for optimization)
+        routing_decision = create_routing_decision(
+            chosen_model=DEFAULT_MODEL,  # Will be filled by observatory_config from env
+            alternative_models=["gpt-4o", "gpt-4o-mini"],
+            reasoning="Chat interaction - using default model",
+            complexity_score=0.5
+        ) if create_routing_decision else None
+        
+        # Tier 3: Cache metadata (placeholder - ready for optimization)
+        cache_metadata = create_cache_metadata(
+            cache_hit=False,
+            cache_key=None,
+            cache_cluster_id="streamlit_chat"
+        ) if create_cache_metadata else None
+        
+        # Track in Observatory - COMPLETE with ALL tiers
         track_llm_call(
-            # Core metrics (model auto-detected from env)
+            # Core metrics (Tier 1) - model auto-detected from env
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name=plugin_used if plugin_used else "ChatAgent",
+            agent_role="orchestrator",  # Added: agent role
             operation="streamlit_chat",
+            success=True,  # Added: explicit success
             
-            # Prompt analysis - auto-extracts breakdown from messages
+            # Prompt analysis (Tier 2) - auto-extracts breakdown from messages
             messages=messages_for_breakdown,
             response_text=response_text,
             prompt_metadata=PROMPT_META,  # Track system prompt version
+            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
             
-            # Quality evaluation (may be None if not sampled)
+            # Quality evaluation (Tier 2) - may be None if not sampled
             quality_evaluation=quality_eval,
+            
+            # Optimization tracking (Tier 3)
+            routing_decision=routing_decision,  # Added: routing
+            cache_metadata=cache_metadata,  # Added: cache
+            
+            # A/B Testing support (Tier 3)
+            prompt_variant_id=None,  # Added: ready for A/B tests
+            test_dataset_id=None,  # Added: ready for test runs
             
             # Additional metadata
             metadata={
@@ -158,6 +191,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
                 "response_length": len(response_text),
                 "conversation_turn": len(history.messages),
                 "system_prompt_version": SYSTEM_PROMPT_VERSION,
+                "judged": quality_eval is not None
             }
         )
         
@@ -182,15 +216,27 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
     except Exception as e:
         logger.error(f"Error in chat_with_kernel: {e}", exc_info=True)
         
-        # Track failed call
+        # Track failed call - COMPLETE
         track_llm_call(
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=(time.time() - start_time) * 1000,
+            agent_name="ChatAgent",
+            agent_role="orchestrator",
             operation="streamlit_chat",
-            success=False,
+            success=False,  # Failed
             error=str(e),
-            metadata={"message_length": len(message)}
+            prompt_metadata=PROMPT_META,
+            prompt_breakdown=None,
+            quality_evaluation=None,
+            routing_decision=None,
+            cache_metadata=None,
+            prompt_variant_id=None,
+            test_dataset_id=None,
+            metadata={
+                "message_length": len(message),
+                "error_type": type(e).__name__
+            }
         )
         
         raise
@@ -229,6 +275,52 @@ def extract_token_usage(response) -> tuple[int, int]:
             completion_tokens = getattr(usage, 'completion_tokens', 0)
     
     return prompt_tokens, completion_tokens
+
+
+def create_prompt_breakdown_from_messages(messages: list) -> dict:
+    """
+    Create prompt breakdown from messages list.
+    
+    Args:
+        messages: List of {"role": "...", "content": "..."} dicts
+    
+    Returns:
+        PromptBreakdown object or None
+    """
+    if not create_prompt_breakdown:
+        return None
+    
+    system_prompt = None
+    system_tokens = 0
+    user_message = None
+    user_tokens = 0
+    chat_history = []
+    chat_history_tokens = 0
+    
+    for msg in messages:
+        role = msg.get("role", "").lower()
+        content = msg.get("content", "")
+        tokens = len(content) // 4
+        
+        if role == "system":
+            system_prompt = content
+            system_tokens = tokens
+        elif role == "user":
+            # Keep last user message
+            user_message = content
+            user_tokens = tokens
+        else:
+            chat_history.append(msg)
+            chat_history_tokens += tokens
+    
+    return create_prompt_breakdown(
+        system_prompt=system_prompt,
+        system_prompt_tokens=system_tokens,
+        user_message=user_message,
+        user_message_tokens=user_tokens,
+        chat_history=chat_history if chat_history else None,
+        chat_history_tokens=chat_history_tokens if chat_history else None,
+    )
 
 
 # ============================================================================

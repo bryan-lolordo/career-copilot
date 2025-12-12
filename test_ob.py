@@ -1,394 +1,471 @@
-#!/usr/bin/env python3
 """
 Observatory Integration Test
-Generates test data for all dashboard pages to verify mapping.
+Location: career-copilot/test_observatory_integration.py
+
+Tests all plugins and verifies Observatory data fields are populated.
 
 Run: python test_observatory_integration.py
 """
 
-import sys
+import asyncio
 import os
+import sys
+import sqlite3
+from datetime import datetime
+from unittest.mock import MagicMock, AsyncMock
+from dotenv import load_dotenv
 
-# Add project root to path if needed
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+load_dotenv()
 
-from observatory_config import (
-    track_llm_call,
-    create_prompt_breakdown,
-    create_prompt_metadata,
-    create_quality_evaluation,
-    create_routing_decision,
-    create_cache_metadata,
-    compute_content_hash,
-    PromptBreakdown,
-    PromptMetadata,
-    QualityEvaluation,
-    RoutingDecision,
-    CacheMetadata
+# =============================================================================
+# SETUP
+# =============================================================================
+
+print("=" * 60)
+print("🧪 OBSERVATORY INTEGRATION TEST")
+print("=" * 60)
+
+# Test database path (separate from production)
+TEST_DB_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "test_observatory.db")
 )
+os.environ['DATABASE_URL'] = f"sqlite:///{TEST_DB_PATH}"
+os.environ['ENABLE_OBSERVATORY'] = 'true'
 
-def test_basic_tracking():
-    """Test 1: Basic LLM call - populates Overview page"""
-    print("\n📊 Test 1: Basic LLM tracking (Overview page)")
-    
-    track_llm_call(
-        prompt_tokens=150,
-        completion_tokens=75,
-        latency_ms=1234,
-        agent_name="TestAgent",
-        operation="basic_test",
-        metadata={"test": "basic_tracking"}
-    )
-    print("   ✅ Basic call tracked")
+print(f"\n📁 Test database: {TEST_DB_PATH}")
 
-def test_prompt_analysis():
-    """Test 2: Prompt breakdown - populates Prompt Analysis page"""
-    print("\n📝 Test 2: Prompt Analysis tracking")
-    
-    # Create prompt breakdown
-    breakdown = create_prompt_breakdown(
-        system_prompt="You are a helpful assistant for career advice.",
-        user_message="What skills should I learn for AI jobs?",
-        chat_history=[
-            {"role": "user", "content": "Hi"},
-            {"role": "assistant", "content": "Hello! How can I help?"}
-        ],
-        response_text="Focus on Python, ML frameworks, and cloud platforms."
-    )
-    
-    # Create prompt metadata (optimization_flags must be Dict[str, bool])
-    metadata = create_prompt_metadata(
-        template_id="career_advisor_v1",
-        version="1.0.0",
-        compressible_sections=["INSTRUCTIONS", "EXAMPLES"],
-        optimization_flags={"uses_few_shot": True, "compressible": True},
-        config_version="1.0"
-    )
-    
-    track_llm_call(
-        prompt_tokens=200,
-        completion_tokens=100,
-        latency_ms=890,
-        agent_name="CareerAdvisor",
-        operation="skill_recommendation",
-        prompt_breakdown=breakdown,
-        prompt_metadata=metadata,
-        metadata={"test": "prompt_analysis"}
-    )
-    print("   ✅ Prompt breakdown tracked")
-    print(f"      - System tokens: {breakdown.system_prompt_tokens if breakdown else 'N/A'}")
-    print(f"      - History count: {breakdown.chat_history_count if breakdown else 'N/A'}")
+# Clean up old test database
+if os.path.exists(TEST_DB_PATH):
+    os.remove(TEST_DB_PATH)
+    print("🗑️  Removed old test database")
 
-def test_quality_evaluation():
-    """Test 3: Quality evaluation - populates Quality page"""
-    print("\n⭐ Test 3: Quality Evaluation tracking")
-    
-    quality = create_quality_evaluation(
-        score=0.85,  # Changed from judge_score
-        judge_model="gpt-4o-mini",
-        reasoning="Response was accurate and helpful, minor formatting issues",
-        hallucination=False,  # Changed from hallucination_flag
-        hallucination_details=None,
-        factual_error=False,
-        evidence_cited=True,
-        failure_reason=None,
-        improvement_suggestion="Add more specific examples",  # Changed from list to string
-        confidence=0.9,
-        criteria_scores={
-            "relevance": 0.9,
-            "accuracy": 0.85,
-            "helpfulness": 0.88,
-            "clarity": 0.82,
-            "professionalism": 0.90
-        }
-    )
-    
-    track_llm_call(
-        prompt_tokens=300,
-        completion_tokens=150,
-        latency_ms=1567,
-        agent_name="ResumeMatching",
-        operation="deep_analyze_job",
-        quality_evaluation=quality,
-        metadata={"test": "quality_evaluation", "judged": True}
-    )
-    print("   ✅ Quality evaluation tracked")
-    print(f"      - Judge score: {quality.judge_score if quality else 'N/A'}")
-    print(f"      - Judge model: {quality.judge_model if quality else 'N/A'}")
 
-def test_quality_with_hallucination():
-    """Test 3b: Quality with hallucination flag"""
-    print("\n⚠️  Test 3b: Quality with hallucination")
-    
-    quality = create_quality_evaluation(
-        score=0.45,  # Changed from judge_score
-        judge_model="gpt-4o-mini",
-        reasoning="Response contained fabricated statistics",
-        hallucination=True,  # Changed from hallucination_flag
-        hallucination_details="Claimed '95% of AI jobs require PhD' - not supported by data",
-        factual_error=True,
-        evidence_cited=False,
-        failure_reason="HALLUCINATION",
-        improvement_suggestion="Remove unsupported claims",  # Changed from list to string
-        confidence=0.7,
-        criteria_scores={
-            "relevance": 0.8,
-            "accuracy": 0.3,
-            "helpfulness": 0.5,
-            "clarity": 0.7,
-            "professionalism": 0.6
-        }
-    )
-    
-    track_llm_call(
-        prompt_tokens=250,
-        completion_tokens=180,
-        latency_ms=2100,
-        agent_name="ResumeTailoring",
-        operation="improve_bullet",
-        quality_evaluation=quality,
-        metadata={"test": "hallucination_detected", "judged": True}
-    )
-    print("   ✅ Hallucination case tracked")
+# =============================================================================
+# IMPORT OBSERVATORY
+# =============================================================================
 
-def test_routing_decision():
-    """Test 4: Routing decision - populates Model Routing page"""
-    print("\n🔀 Test 4: Model Routing tracking")
-    
-    routing = create_routing_decision(
-        chosen_model="gpt-4o-mini",
-        alternative_models=["gpt-4o", "gpt-4", "claude-3-sonnet"],
-        reasoning="Simple task, efficient model sufficient",
-        complexity_score=0.4,
-        estimated_cost_savings=0.025,
-        routing_strategy="complexity_based",
-        model_scores={
-            "gpt-4o-mini": 0.92,
-            "gpt-4o": 0.95,
-            "gpt-4": 0.88
-        }
-    )
-    
-    track_llm_call(
-        prompt_tokens=180,
-        completion_tokens=90,
-        latency_ms=750,
-        agent_name="DatabaseQuery",
-        operation="generate_sql",
-        routing_decision=routing,
-        metadata={"test": "routing_decision"}
-    )
-    print("   ✅ Routing decision tracked")
-    print(f"      - Chosen: {routing.chosen_model if routing else 'N/A'}")
-    print(f"      - Savings: ${routing.estimated_cost_savings if routing else 'N/A'}")
+print("\n🔌 Testing imports...")
 
-def test_cache_metadata():
-    """Test 5: Cache metadata - populates Cache Analysis page"""
-    print("\n💾 Test 5: Cache Metadata tracking")
-    
-    prompt = "What are the top skills for AI engineering roles?"
-    
-    cache = create_cache_metadata(
-        cache_hit=False,
-        cache_key="skill_query_ai_engineering",
-        cache_cluster_id="career_queries",
-        similarity_score=0.0,
-        cache_key_candidates=["ai_skills", "engineering_skills", "tech_skills"],
-        dynamic_fields=["user_context", "timestamp"],
-        content_hash=compute_content_hash(prompt),
-        ttl_seconds=3600
+try:
+    from observatory_config import (
+        obs,
+        track_llm_call,
+        start_session,
+        end_session,
+        create_prompt_breakdown,
+        create_routing_decision,
+        create_cache_metadata,
+        create_prompt_metadata,
+        judge,
+        cache,
+        router,
     )
-    
-    track_llm_call(
-        prompt_tokens=120,
-        completion_tokens=200,
-        latency_ms=1100,
-        agent_name="CareerAdvisor",
-        operation="skill_analysis",
-        cache_metadata=cache,
-        metadata={"test": "cache_miss"}
-    )
-    print("   ✅ Cache miss tracked")
-    
-    # Now simulate a cache hit
-    cache_hit = create_cache_metadata(
-        cache_hit=True,
-        cache_key="skill_query_ai_engineering",
-        cache_cluster_id="career_queries",
-        similarity_score=0.95,
-        cache_key_candidates=["ai_skills"],
-        dynamic_fields=[],
-        content_hash=compute_content_hash(prompt),
-        ttl_seconds=3600
-    )
-    
-    track_llm_call(
-        prompt_tokens=120,
-        completion_tokens=200,
-        latency_ms=45,  # Much faster due to cache hit
-        agent_name="CareerAdvisor",
-        operation="skill_analysis",
-        cache_metadata=cache_hit,
-        metadata={"test": "cache_hit"}
-    )
-    print("   ✅ Cache hit tracked")
-    print(f"      - Similarity: {cache_hit.similarity_score if cache_hit else 'N/A'}")
+    print("  ✅ observatory_config imports successful")
+except ImportError as e:
+    print(f"  ❌ observatory_config import failed: {e}")
+    sys.exit(1)
 
-def test_full_integration():
-    """Test 6: Full integration - all fields populated"""
-    print("\n🎯 Test 6: Full Integration (all fields)")
-    
-    # All Tier 2 models populated
-    breakdown = create_prompt_breakdown(
-        system_prompt="You are an expert resume matcher...",
-        user_message="Match my resume to this AI Engineer role at Google",
-        chat_history=[
-            {"role": "user", "content": "Match my resume"},
-            {"role": "assistant", "content": "Which resume?"},
-            {"role": "user", "content": "The first one"}
-        ],
-        response_text="Your resume scored 85/100 for this role..."
+try:
+    from observatory import (
+        Observatory,
+        RoutingDecision,
+        CacheMetadata,
+        QualityEvaluation,
+        PromptBreakdown,
+        PromptMetadata,
     )
-    
-    metadata = create_prompt_metadata(
-        template_id="resume_matching_deep_analyze",
-        version="1.0.0",
-        compressible_sections=["EXAMPLES", "CONFIDENCE RULES"],
-        optimization_flags={"detailed_analysis": True, "compressible": True},
-        config_version="1.0"
-    )
-    
-    quality = create_quality_evaluation(
-        score=0.88,  # Changed from judge_score
-        judge_model="gpt-4o-mini",
-        reasoning="Comprehensive analysis with good skill matching",
-        hallucination=False,  # Changed from hallucination_flag
-        factual_error=False,
-        evidence_cited=True,
-        confidence=0.85,
-        criteria_scores={
-            "relevance": 0.92,
-            "accuracy": 0.88,
-            "helpfulness": 0.90,
-            "clarity": 0.85,
-            "professionalism": 0.87
-        }
-    )
-    
-    routing = create_routing_decision(
-        chosen_model="gpt-4o-mini",
-        alternative_models=["gpt-4o"],
-        reasoning="Deep analysis task",
-        complexity_score=0.7,
-        estimated_cost_savings=0.015,
-        routing_strategy="task_based",
-        model_scores={"gpt-4o-mini": 0.88, "gpt-4o": 0.92}
-    )
-    
-    cache = create_cache_metadata(
-        cache_hit=False,
-        cache_key="resume_job_match_123_456",
-        cache_cluster_id="resume_matching",
-        similarity_score=0.0,
-        content_hash=compute_content_hash("resume+job"),
-        ttl_seconds=7200
-    )
-    
-    track_llm_call(
-        prompt_tokens=500,
-        completion_tokens=350,
-        latency_ms=2500,
-        agent_name="ResumeMatching",
-        operation="deep_analyze_job",
-        prompt_breakdown=breakdown,
-        prompt_metadata=metadata,
-        quality_evaluation=quality,
-        routing_decision=routing,
-        cache_metadata=cache,
-        metadata={
-            "test": "full_integration",
-            "job_id": 123,
-            "resume_id": 456,
-            "judged": True
-        }
-    )
-    print("   ✅ Full integration tracked")
-    print("      - All 5 Tier 2 models populated")
+    print("  ✅ observatory SDK imports successful")
+except ImportError as e:
+    print(f"  ❌ observatory SDK import failed: {e}")
+    sys.exit(1)
 
-def test_multiple_operations():
-    """Test 7: Multiple operations for agent breakdown"""
-    print("\n📈 Test 7: Multiple Operations (for charts)")
+
+# =============================================================================
+# MOCK DEPENDENCIES
+# =============================================================================
+
+def create_mock_kernel():
+    """Create a mock Semantic Kernel that returns realistic responses."""
+    kernel = MagicMock()
     
-    operations = [
-        ("ChatAgent", "streamlit_chat", 400, 200, 1500),
-        ("ChatAgent", "streamlit_chat", 350, 180, 1400),
-        ("ResumeMatching", "quick_score_job", 200, 100, 800),
-        ("ResumeMatching", "quick_score_job", 220, 110, 850),
-        ("ResumeMatching", "quick_score_job", 190, 95, 780),
-        ("ResumeMatching", "deep_analyze_job", 450, 300, 2200),
-        ("ResumeTailoring", "improve_bullet", 300, 250, 1800),
-        ("DatabaseQuery", "generate_sql", 150, 50, 500),
-        ("SelfImprovingMatch", "critique_match", 280, 200, 1600),
+    async def mock_invoke_prompt(prompt):
+        # Return different responses based on prompt content
+        if "Score how well" in prompt or "quick" in prompt.lower():
+            return MagicMock(__str__=lambda _: '''{
+                "score": 85,
+                "confidence": 0.78,
+                "confidence_reasoning": "Good skills match",
+                "uncertainty_factors": ["Experience level unclear"],
+                "score_breakdown": {"skills_match": 90, "experience_match": 80},
+                "reason_bullets": ["Strong Python skills", "AWS experience matches"]
+            }''')
+        elif "semantic analysis" in prompt or "deep" in prompt.lower():
+            return MagicMock(__str__=lambda _: '''{
+                "overall_score": 87,
+                "confidence": 0.82,
+                "confidence_reasoning": "Strong alignment",
+                "uncertainty_factors": [],
+                "score_breakdown": {"skills_match": 90, "experience_match": 85},
+                "matched_bullets": [{"job_requirement": "Python", "resume_bullet": "5 years Python", "match_strength": "strong", "explanation": "Direct match"}],
+                "matched_skills": ["Python", "AWS", "SQL"],
+                "missing_skills": ["Kubernetes"],
+                "strengths": ["Strong backend experience"],
+                "gaps": ["No frontend experience"],
+                "improvement_suggestions": ["Add K8s projects"],
+                "summary": "Strong match for backend role"
+            }''')
+        elif "improved resume bullet" in prompt.lower() or "bullet point" in prompt.lower():
+            return MagicMock(__str__=lambda _: '''{
+                "suggestions": [
+                    {"version": 1, "bullet": "Architected scalable microservices", "explanation": "Strong action verb"},
+                    {"version": 2, "bullet": "Led team of 5 engineers", "explanation": "Shows leadership"},
+                    {"version": 3, "bullet": "Reduced latency by 40%", "explanation": "Quantifiable impact"}
+                ],
+                "original_identified": "Built backend services"
+            }''')
+        elif "SQL" in prompt or "query" in prompt.lower():
+            return MagicMock(__str__=lambda _: "SELECT * FROM jobs WHERE title LIKE '%Python%' LIMIT 10")
+        else:
+            return MagicMock(__str__=lambda _: '{"result": "ok"}')
+    
+    kernel.invoke_prompt = mock_invoke_prompt
+    return kernel
+
+
+def create_mock_db_service():
+    """Create a mock database service."""
+    db = MagicMock()
+    
+    db.list_all_resumes.return_value = [
+        {"id": 1, "name": "John_Doe_Resume.pdf", "content": "Python developer with 5 years experience..."},
+        {"id": 2, "name": "Jane_Smith_Resume.pdf", "content": "Data scientist specializing in ML..."},
     ]
     
-    for agent, op, prompt_tok, comp_tok, latency in operations:
-        track_llm_call(
-            prompt_tokens=prompt_tok,
-            completion_tokens=comp_tok,
-            latency_ms=latency,
-            agent_name=agent,
-            operation=op,
-            metadata={"test": "multiple_operations"}
-        )
+    db.get_resume_by_id.return_value = {
+        "id": 1,
+        "name": "John_Doe_Resume.pdf",
+        "content": "Python developer with 5 years experience in AWS, SQL, and microservices..."
+    }
     
-    print(f"   ✅ Tracked {len(operations)} operations across multiple agents")
+    db.get_most_recent_resume.return_value = db.get_resume_by_id.return_value
+    
+    db.get_all_jobs.return_value = [
+        {"id": 1, "title": "Senior Python Developer", "company": "TechCorp", "location": "Chicago", "description": "Looking for Python expert...", "link": "https://example.com/job1"},
+        {"id": 2, "title": "Data Engineer", "company": "DataCo", "location": "Remote", "description": "Build data pipelines...", "link": "https://example.com/job2"},
+    ]
+    
+    db.get_job_by_id.return_value = db.get_all_jobs.return_value[0]
+    
+    db.save_match.return_value = True
+    
+    return db
 
-def run_all_tests():
-    """Run all tests"""
+
+def create_mock_memory():
+    """Create a mock conversation memory."""
+    memory = MagicMock()
+    memory.context = MagicMock()
+    memory.context.available_resumes = []
+    memory.context.last_searched_jobs = []
+    memory.get_recent_matches.return_value = [
+        {"job_id": 1, "title": "Python Developer", "company": "TechCorp", "score": 85, "reason": "Good match"}
+    ]
+    return memory
+
+
+# =============================================================================
+# TEST FUNCTIONS
+# =============================================================================
+
+async def test_track_llm_call_basic():
+    """Test basic track_llm_call functionality."""
+    print("\n📊 Testing basic track_llm_call...")
+    
+    track_llm_call(
+        model_name="gpt-4o-mini",
+        prompt_tokens=100,
+        completion_tokens=50,
+        latency_ms=500,
+        agent_name="TestAgent",
+        agent_role="analyst",
+        operation="test_basic",
+        success=True,
+        prompt="Test prompt",
+        response_text="Test response",
+        metadata={"test": True}
+    )
+    print("  ✅ Basic track_llm_call completed")
+
+
+async def test_track_llm_call_full():
+    """Test track_llm_call with all Tier 1-3 fields."""
+    print("\n📊 Testing full track_llm_call with all tiers...")
+    
+    # Create all tracking objects
+    prompt_breakdown = create_prompt_breakdown(
+        system_prompt="You are a helpful assistant.",
+        system_prompt_tokens=10,
+        user_message="Hello world",
+        user_message_tokens=5,
+    )
+    
+    routing_decision = create_routing_decision(
+        chosen_model="gpt-4o-mini",
+        alternative_models=["gpt-4o"],
+        reasoning="Simple task",
+        complexity_score=0.3,
+        estimated_cost_savings=0.01
+    )
+    
+    cache_metadata = create_cache_metadata(
+        cache_hit=False,
+        cache_key="test:key:123",
+        cache_cluster_id="test_cluster"
+    )
+    
+    prompt_metadata = create_prompt_metadata(
+        template_id="test_template",
+        version="1.0.0",
+        compressible_sections=["context"],
+        optimization_flags={"test": True}
+    )
+    
+    track_llm_call(
+        model_name="gpt-4o-mini",
+        prompt_tokens=100,
+        completion_tokens=50,
+        latency_ms=500,
+        agent_name="TestAgent",
+        agent_role="analyst",
+        operation="test_full",
+        success=True,
+        prompt="Full test prompt",
+        response_text="Full test response",
+        system_prompt="You are a test assistant.",
+        user_message="Test user message",
+        messages=[{"role": "system", "content": "test"}, {"role": "user", "content": "hello"}],
+        routing_decision=routing_decision,
+        cache_metadata=cache_metadata,
+        prompt_breakdown=prompt_breakdown,
+        prompt_metadata=prompt_metadata,
+        prompt_variant_id="test_variant_a",
+        test_dataset_id="test_dataset_001",
+        metadata={"tier": "full", "test": True}
+    )
+    print("  ✅ Full track_llm_call completed")
+
+
+async def test_resume_matching_plugin():
+    """Test ResumeMatchingPlugin tracking."""
+    print("\n📊 Testing ResumeMatchingPlugin...")
+    
+    try:
+        from agents.plugins.ResumeMatchingPlugin import ResumeMatchingPlugin
+        
+        kernel = create_mock_kernel()
+        db = create_mock_db_service()
+        memory = create_mock_memory()
+        
+        plugin = ResumeMatchingPlugin(kernel, db, memory)
+        
+        # Test list_resumes
+        result = await plugin.list_resumes()
+        print(f"  ✅ list_resumes: {len(result)} chars")
+        
+        # Test select_resume_for_matching
+        memory.context.available_resumes = db.list_all_resumes()
+        result = await plugin.select_resume_for_matching("1")
+        print(f"  ✅ select_resume_for_matching: {len(result)} chars")
+        
+        # Test quick score (internal method)
+        job = db.get_all_jobs()[0]
+        resume_text = db.get_resume_by_id(1)['content']
+        result = await plugin._quick_score_job_match(resume_text, job)
+        print(f"  ✅ _quick_score_job_match: score={result.get('score')}")
+        
+        # Test deep analyze (internal method)
+        result = await plugin._deep_analyze_job_match(resume_text, job, 85)
+        print(f"  ✅ _deep_analyze_job_match: score={result.get('score')}")
+        
+    except ImportError as e:
+        print(f"  ⚠️ ResumeMatchingPlugin not importable: {e}")
+    except Exception as e:
+        print(f"  ❌ ResumeMatchingPlugin error: {e}")
+
+
+async def test_resume_tailoring_plugin():
+    """Test ResumeTailoringPlugin tracking."""
+    print("\n📊 Testing ResumeTailoringPlugin...")
+    
+    try:
+        from agents.plugins.ResumeTailoringPlugin import ResumeTailoringPlugin
+        
+        kernel = create_mock_kernel()
+        memory = create_mock_memory()
+        
+        plugin = ResumeTailoringPlugin(kernel, memory)
+        
+        result = await plugin.improve_resume_bullet(
+            resume_text="Python developer with 5 years experience...",
+            job_description="Looking for senior Python developer...",
+            job_title="Senior Python Developer",
+            company="TechCorp",
+            user_request="Make my experience sound more impactful"
+        )
+        print(f"  ✅ improve_resume_bullet: {len(result)} chars")
+        
+    except ImportError as e:
+        print(f"  ⚠️ ResumeTailoringPlugin not importable: {e}")
+    except Exception as e:
+        print(f"  ❌ ResumeTailoringPlugin error: {e}")
+
+
+async def test_query_database_plugin():
+    """Test QueryDatabasePlugin tracking."""
+    print("\n📊 Testing QueryDatabasePlugin...")
+    
+    try:
+        from agents.plugins.QueryDatabasePlugin import DatabaseQueryPlugin
+        
+        kernel = create_mock_kernel()
+        memory = create_mock_memory()
+        
+        plugin = DatabaseQueryPlugin(kernel, memory)
+        
+        result = await plugin.query_database_with_ai("Show me all Python jobs")
+        print(f"  ✅ query_database_with_ai: {len(str(result))} chars")
+        
+    except ImportError as e:
+        print(f"  ⚠️ QueryDatabasePlugin not importable: {e}")
+    except Exception as e:
+        print(f"  ❌ QueryDatabasePlugin error: {e}")
+
+
+async def test_job_plugin():
+    """Test JobPlugin tracking."""
+    print("\n📊 Testing JobPlugin...")
+    
+    try:
+        from agents.plugins.JobPlugin import JobPlugin
+        
+        context = MagicMock()
+        context.last_searched_jobs = []
+        
+        plugin = JobPlugin(context=context)
+        
+        # Note: find_jobs makes real API calls, so we just test get_saved_jobs
+        result = await plugin.get_saved_jobs(limit=5)
+        print(f"  ✅ get_saved_jobs: {len(result)} chars")
+        
+    except ImportError as e:
+        print(f"  ⚠️ JobPlugin not importable: {e}")
+    except Exception as e:
+        print(f"  ❌ JobPlugin error: {e}")
+
+
+# =============================================================================
+# VERIFY DATABASE
+# =============================================================================
+
+def verify_database():
+    """Check what data was recorded in the Observatory database."""
+    print("\n" + "=" * 60)
+    print("🔍 VERIFYING DATABASE RECORDS")
     print("=" * 60)
-    print("🧪 OBSERVATORY INTEGRATION TEST")
-    print("=" * 60)
     
-    # Check if models are available
-    print("\n🔍 Checking model availability...")
-    models_available = all([
-        PromptBreakdown is not None,
-        PromptMetadata is not None,
-        QualityEvaluation is not None,
-        RoutingDecision is not None,
-        CacheMetadata is not None
-    ])
+    if not os.path.exists(TEST_DB_PATH):
+        print("  ❌ Test database does not exist!")
+        return
     
-    if models_available:
-        print("   ✅ All Tier 2 models available")
-    else:
-        print("   ⚠️  Some models not available (check observatory_client)")
-        print(f"      PromptBreakdown: {PromptBreakdown is not None}")
-        print(f"      PromptMetadata: {PromptMetadata is not None}")
-        print(f"      QualityEvaluation: {QualityEvaluation is not None}")
-        print(f"      RoutingDecision: {RoutingDecision is not None}")
-        print(f"      CacheMetadata: {CacheMetadata is not None}")
+    conn = sqlite3.connect(TEST_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
     
-    # Run tests
-    test_basic_tracking()
-    test_prompt_analysis()
-    test_quality_evaluation()
-    test_quality_with_hallucination()
-    test_routing_decision()
-    test_cache_metadata()
-    test_full_integration()
-    test_multiple_operations()
+    # Get tables
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = [row[0] for row in cursor.fetchall()]
+    print(f"\n📋 Tables found: {tables}")
+    
+    # Check llm_calls table
+    if 'llm_calls' in tables:
+        cursor.execute("SELECT COUNT(*) FROM llm_calls")
+        count = cursor.fetchone()[0]
+        print(f"\n📊 LLM Calls recorded: {count}")
+        
+        if count > 0:
+            cursor.execute("SELECT * FROM llm_calls ORDER BY timestamp DESC LIMIT 5")
+            rows = cursor.fetchall()
+            
+            print("\n📝 Sample records:")
+            for row in rows:
+                row_dict = dict(row)
+                print(f"\n  Operation: {row_dict.get('operation', 'N/A')}")
+                print(f"  Agent: {row_dict.get('agent_name', 'N/A')}")
+                print(f"  Agent Role: {row_dict.get('agent_role', 'N/A')}")
+                print(f"  Model: {row_dict.get('model_name', 'N/A')}")
+                print(f"  Tokens: {row_dict.get('prompt_tokens', 0)} + {row_dict.get('completion_tokens', 0)}")
+                print(f"  Latency: {row_dict.get('latency_ms', 0):.0f}ms")
+                print(f"  Success: {row_dict.get('success', 'N/A')}")
+                
+            # Check field population
+            print("\n📈 Field Population Check:")
+            fields_to_check = [
+                'agent_name', 'agent_role', 'operation', 'model_name',
+                'prompt_tokens', 'completion_tokens', 'latency_ms',
+                'prompt', 'response_text', 'success',
+                'routing_decision', 'cache_metadata', 'quality_evaluation',
+                'prompt_breakdown', 'prompt_metadata',
+                'prompt_variant_id', 'test_dataset_id'
+            ]
+            
+            for field in fields_to_check:
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM llm_calls WHERE {field} IS NOT NULL AND {field} != ''")
+                    populated = cursor.fetchone()[0]
+                    status = "✅" if populated > 0 else "⚠️"
+                    print(f"  {status} {field}: {populated}/{count} populated")
+                except:
+                    print(f"  ❓ {field}: column may not exist")
+    
+    # Check sessions table
+    if 'sessions' in tables:
+        cursor.execute("SELECT COUNT(*) FROM sessions")
+        count = cursor.fetchone()[0]
+        print(f"\n📊 Sessions recorded: {count}")
+    
+    conn.close()
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+async def main():
+    """Run all tests."""
+    
+    # Basic tracking tests
+    await test_track_llm_call_basic()
+    await test_track_llm_call_full()
+    
+    # Plugin tests (may fail if plugins not in path)
+    await test_resume_matching_plugin()
+    await test_resume_tailoring_plugin()
+    await test_query_database_plugin()
+    await test_job_plugin()
+    
+    # Verify what was recorded
+    verify_database()
     
     print("\n" + "=" * 60)
-    print("✅ ALL TESTS COMPLETE")
+    print("✅ TEST COMPLETE")
     print("=" * 60)
-    print("\nNow check your Observatory dashboard:")
-    print("  📊 Overview     - Should show new calls, tokens, costs")
-    print("  ⭐ Quality      - Should show judge scores, hallucination data")
-    print("  📝 Prompts      - Should show breakdown, template versions")
-    print("  🔀 Routing      - Should show model choices, savings")
-    print("  💾 Cache        - Should show hits/misses, clusters")
-    print("\nRun: streamlit run observatory_dashboard.py")
+    print(f"\nTest database saved at: {TEST_DB_PATH}")
+    print("You can inspect it with: sqlite3 test_observatory.db")
+    print("\nNext steps:")
+    print("1. Fix any ❌ errors above")
+    print("2. Check ⚠️ warnings for missing data")
+    print("3. Run real workflows to collect baseline data")
+
 
 if __name__ == "__main__":
-    run_all_tests()
+    asyncio.run(main())

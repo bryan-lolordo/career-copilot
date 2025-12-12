@@ -1,7 +1,7 @@
 # agents/plugins/SelfImprovingMatchPlugin.py
 """
 Self-Improving Match Plugin - Career Copilot
-UPDATED: Complete Observatory Tier 2 metrics coverage
+UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
 
 AI reviews and improves its own matching analysis through iterative refinement.
 """
@@ -9,15 +9,26 @@ AI reviews and improves its own matching analysis through iterative refinement.
 from semantic_kernel.functions import kernel_function
 from typing import Annotated
 import json
+import logging
+import os
 import time
 
-# Observatory Integration - Updated imports
+# Observatory Integration - Complete imports
 from observatory_config import (
+    start_session,
+    end_session,
     track_llm_call,
     create_prompt_metadata,
+    create_prompt_breakdown,
+    create_routing_decision,
+    create_cache_metadata,
+    judge,
+    DEFAULT_MODEL,
     PromptMetadata
 )
-from llm_judge import maybe_judge_response
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # PROMPT VERSIONING
@@ -347,34 +358,65 @@ Format:
         prompt_tokens = len(full_prompt) // 4
         completion_tokens = len(result_str) // 4
         
+        # Create prompt breakdown for Tier 2
+        prompt_breakdown = create_prompt_breakdown(
+            system_prompt=system_prompt,
+            system_prompt_tokens=len(system_prompt) // 4,
+            user_message=user_message,
+            user_message_tokens=len(user_message) // 4,
+        ) if create_prompt_breakdown else None
+        
         # LLM Judge evaluation (50% sampling)
-        quality_eval = await maybe_judge_response(
-            self.kernel,
-            "deep_analyze_with_guidance",
-            full_prompt[:5000],
-            result_str[:5000],
-            context={
-                "job_title": job.get('title', 'Unknown'),
-                "mode": "initial_analysis"
-            }
+        quality_eval = await judge.maybe_evaluate(
+            operation="deep_analyze_with_guidance",
+            prompt=full_prompt[:5000],
+            response=result_str[:5000],
+            llm_client=self.kernel, 
         )
         
-        # Track in Observatory - SINGLE CALL with all data
+        # Tier 3: Routing decision (placeholder - ready for optimization)
+        routing_decision = create_routing_decision(
+            chosen_model=DEFAULT_MODEL,
+            alternative_models=["gpt-4o", "gpt-4o-mini"],
+            reasoning="Deep analysis - complex task requiring premium model",
+            complexity_score=0.8
+        ) if create_routing_decision else None
+        
+        # Tier 3: Cache metadata (placeholder - ready for optimization)
+        cache_metadata = create_cache_metadata(
+            cache_hit=False,
+            cache_key=None,
+            cache_cluster_id="deep_analysis"
+        ) if create_cache_metadata else None
+        
+        # Track in Observatory - COMPLETE with all tiers
         track_llm_call(
+            # Core metrics (Tier 1)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name="SelfImprovingMatch",
+            agent_role="analyst",  # Added: agent role
             operation="deep_analyze_with_guidance",
+            success=True,  # Added: explicit success
             
-            # Prompt analysis
+            # Prompt analysis (Tier 2)
             system_prompt=system_prompt,
             user_message=user_message[:5000],
             response_text=result_str[:5000],
             prompt_metadata=DEEP_ANALYZE_GUIDANCE_META,
+            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
             
-            # Quality evaluation
+            # Quality evaluation (Tier 2)
             quality_evaluation=quality_eval,
+            
+            # Optimization tracking (Tier 3)
+            routing_decision=routing_decision,  # Added: routing
+            cache_metadata=cache_metadata,  # Added: cache
+            
+            # A/B Testing support (Tier 3)
+            prompt_variant_id=None,  # Added: ready for A/B tests
+            test_dataset_id=None,  # Added: ready for test runs
             
             # Metadata
             metadata={
@@ -516,35 +558,65 @@ Company: {job.get('company', 'N/A')}
         prompt_tokens = len(full_prompt) // 4
         completion_tokens = len(result_str) // 4
         
+        # Create prompt breakdown for Tier 2
+        prompt_breakdown = create_prompt_breakdown(
+            system_prompt=system_prompt,
+            system_prompt_tokens=len(system_prompt) // 4,
+            user_message=user_message,
+            user_message_tokens=len(user_message) // 4,
+        ) if create_prompt_breakdown else None
+        
         # LLM Judge evaluation (50% sampling)
-        quality_eval = await maybe_judge_response(
-            self.kernel,
-            "deep_analyze_with_guidance",
-            full_prompt[:5000],
-            result_str[:5000],
-            context={
-                "job_title": job.get('title', 'Unknown'),
-                "mode": "refinement",
-                "previous_score": existing_score
-            }
+        quality_eval = await judge.maybe_evaluate(
+            operation="deep_analyze_with_guidance",
+            prompt=full_prompt[:5000],
+            response=result_str[:5000],
+            llm_client=self.kernel, 
         )
         
-        # Track in Observatory - SINGLE CALL with all data
+        # Tier 3: Routing decision (placeholder)
+        routing_decision = create_routing_decision(
+            chosen_model=DEFAULT_MODEL,
+            alternative_models=["gpt-4o", "gpt-4o-mini"],
+            reasoning="Refinement analysis - complex iterative task",
+            complexity_score=0.75
+        ) if create_routing_decision else None
+        
+        # Tier 3: Cache metadata (placeholder)
+        cache_metadata = create_cache_metadata(
+            cache_hit=False,
+            cache_key=None,
+            cache_cluster_id="refinement_analysis"
+        ) if create_cache_metadata else None
+        
+        # Track in Observatory - COMPLETE with all tiers
         track_llm_call(
+            # Core metrics (Tier 1)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name="SelfImprovingMatch",
+            agent_role="analyst",  # Added: agent role
             operation="refine_analysis",
+            success=True,  # Added: explicit success
             
-            # Prompt analysis
+            # Prompt analysis (Tier 2)
             system_prompt=system_prompt,
             user_message=user_message[:5000],
             response_text=result_str[:5000],
             prompt_metadata=REFINE_ANALYSIS_META,
+            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
             
-            # Quality evaluation
+            # Quality evaluation (Tier 2)
             quality_evaluation=quality_eval,
+            
+            # Optimization tracking (Tier 3)
+            routing_decision=routing_decision,  # Added: routing
+            cache_metadata=cache_metadata,  # Added: cache
+            
+            # A/B Testing support (Tier 3)
+            prompt_variant_id=None,  # Added: ready for A/B tests
+            test_dataset_id=None,  # Added: ready for test runs
             
             # Metadata
             metadata={
@@ -651,34 +723,65 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
         prompt_tokens = len(full_prompt) // 4
         completion_tokens = len(result_str) // 4
         
+        # Create prompt breakdown for Tier 2
+        prompt_breakdown = create_prompt_breakdown(
+            system_prompt=system_prompt,
+            system_prompt_tokens=len(system_prompt) // 4,
+            user_message=user_message,
+            user_message_tokens=len(user_message) // 4,
+        ) if create_prompt_breakdown else None
+        
         # LLM Judge evaluation (50% sampling)
-        quality_eval = await maybe_judge_response(
-            self.kernel,
-            "critique_match",
-            full_prompt,
-            result_str,
-            context={
-                "job_title": job.get('title', 'Unknown'),
-                "match_score": analysis.get('score', 0)
-            }
+        quality_eval = await judge.maybe_evaluate(
+            operation="critique_match",
+            prompt=full_prompt,
+            response=result_str,
+            llm_client=self.kernel, 
         )
         
-        # Track in Observatory - SINGLE CALL with all data
+        # Tier 3: Routing decision (placeholder)
+        routing_decision = create_routing_decision(
+            chosen_model=DEFAULT_MODEL,
+            alternative_models=["gpt-4o", "gpt-4o-mini"],
+            reasoning="Quality review - medium complexity",
+            complexity_score=0.6
+        ) if create_routing_decision else None
+        
+        # Tier 3: Cache metadata (placeholder)
+        cache_metadata = create_cache_metadata(
+            cache_hit=False,
+            cache_key=None,
+            cache_cluster_id="critique"
+        ) if create_cache_metadata else None
+        
+        # Track in Observatory - COMPLETE with all tiers
         track_llm_call(
+            # Core metrics (Tier 1)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name="SelfImprovingMatch",
+            agent_role="reviewer",  # Added: agent role
             operation="critique_match",
+            success=True,  # Added: explicit success
             
-            # Prompt analysis
+            # Prompt analysis (Tier 2)
             system_prompt=system_prompt,
             user_message=user_message,
             response_text=result_str,
             prompt_metadata=CRITIQUE_MATCH_META,
+            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
             
-            # Quality evaluation
+            # Quality evaluation (Tier 2)
             quality_evaluation=quality_eval,
+            
+            # Optimization tracking (Tier 3)
+            routing_decision=routing_decision,  # Added: routing
+            cache_metadata=cache_metadata,  # Added: cache
+            
+            # A/B Testing support (Tier 3)
+            prompt_variant_id=None,  # Added: ready for A/B tests
+            test_dataset_id=None,  # Added: ready for test runs
             
             # Metadata
             metadata={
@@ -752,19 +855,57 @@ CRITICAL: Return ONLY valid JSON."""
         prompt_tokens = len(full_prompt) // 4
         completion_tokens = len(result_str) // 4
         
-        # Track in Observatory - NO JUDGE (low value operation)
+        # Create prompt breakdown for Tier 2
+        prompt_breakdown = create_prompt_breakdown(
+            system_prompt=system_prompt,
+            system_prompt_tokens=len(system_prompt) // 4,
+            user_message=user_message,
+            user_message_tokens=len(user_message) // 4,
+        ) if create_prompt_breakdown else None
+        
+        # Tier 3: Routing decision (placeholder)
+        routing_decision = create_routing_decision(
+            chosen_model=DEFAULT_MODEL,
+            alternative_models=["gpt-4o", "gpt-4o-mini"],
+            reasoning="Simple guidance generation - low complexity",
+            complexity_score=0.3
+        ) if create_routing_decision else None
+        
+        # Tier 3: Cache metadata (placeholder)
+        cache_metadata = create_cache_metadata(
+            cache_hit=False,
+            cache_key=None,
+            cache_cluster_id="refinements"
+        ) if create_cache_metadata else None
+        
+        # Track in Observatory - COMPLETE with all tiers (NO JUDGE - low value)
         track_llm_call(
+            # Core metrics (Tier 1)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name="SelfImprovingMatch",
+            agent_role="planner",  # Added: agent role
             operation="generate_refinements",
+            success=True,  # Added: explicit success
             
-            # Prompt analysis
+            # Prompt analysis (Tier 2)
             system_prompt=system_prompt,
             user_message=user_message,
             response_text=result_str,
             prompt_metadata=GENERATE_REFINEMENTS_META,
+            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
+            
+            # No quality evaluation for this low-value operation
+            quality_evaluation=None,
+            
+            # Optimization tracking (Tier 3)
+            routing_decision=routing_decision,  # Added: routing
+            cache_metadata=cache_metadata,  # Added: cache
+            
+            # A/B Testing support (Tier 3)
+            prompt_variant_id=None,  # Added: ready for A/B tests
+            test_dataset_id=None,  # Added: ready for test runs
             
             # Metadata
             metadata={

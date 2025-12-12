@@ -5,10 +5,10 @@ Semantic Kernel Setup - Single Source of Truth
 This module is the MAIN configuration file for Career Copilot.
 Both CLI and Streamlit chatbot import from here.
 
-COMPREHENSIVE: Full Observatory Tier 2 metrics support
-- PromptBreakdown (auto-extracted)
-- PromptMetadata (version tracking)
-- QualityEvaluation (from LLM Judge)
+COMPREHENSIVE: Full Observatory Tier 1, 2, 3 metrics support
+- Tier 1: Core metrics (tokens, latency, cost)
+- Tier 2: PromptBreakdown, PromptMetadata, QualityEvaluation
+- Tier 3: RoutingDecision, CacheMetadata, A/B Testing support
 
 To modify:
 - System prompt → Edit SYSTEM_PROMPT below (and bump SYSTEM_PROMPT_VERSION!)
@@ -44,15 +44,19 @@ from agents.plugins.SelfImprovingMatchPlugin import SelfImprovingMatchPlugin
 from services.database_service import DatabaseService
 from services.conversation_memory import ConversationMemory
 
-# Observatory Integration
+# Observatory Integration - Complete imports
 from observatory_config import (
-    start_tracking_session, 
-    end_tracking_session, 
+    start_session, 
+    end_session, 
     track_llm_call,
     create_prompt_metadata,
+    create_prompt_breakdown,
+    create_routing_decision,
+    create_cache_metadata,
+    judge,
+    DEFAULT_MODEL,
     PromptMetadata
 )
-from llm_judge import maybe_judge_response
 
 load_dotenv()
 
@@ -349,6 +353,55 @@ def extract_messages_from_history(chat_history) -> list:
 
 
 # ============================================================================
+# HELPER: Create prompt breakdown from messages
+# ============================================================================
+def create_prompt_breakdown_from_messages(messages: list) -> dict:
+    """
+    Create prompt breakdown from messages list.
+    
+    Args:
+        messages: List of {"role": "...", "content": "..."} dicts
+    
+    Returns:
+        PromptBreakdown object or None
+    """
+    if not create_prompt_breakdown:
+        return None
+    
+    system_prompt = None
+    system_tokens = 0
+    user_message = None
+    user_tokens = 0
+    chat_history = []
+    chat_history_tokens = 0
+    
+    for msg in messages:
+        role = msg.get("role", "").lower()
+        content = msg.get("content", "")
+        tokens = len(content) // 4
+        
+        if role == "system":
+            system_prompt = content
+            system_tokens = tokens
+        elif role == "user":
+            # Keep last user message
+            user_message = content
+            user_tokens = tokens
+        else:
+            chat_history.append(msg)
+            chat_history_tokens += tokens
+    
+    return create_prompt_breakdown(
+        system_prompt=system_prompt,
+        system_prompt_tokens=system_tokens,
+        user_message=user_message,
+        user_message_tokens=user_tokens,
+        chat_history=chat_history if chat_history else None,
+        chat_history_tokens=chat_history_tokens if chat_history else None,
+    )
+
+
+# ============================================================================
 # CLI PROMPT METADATA
 # ============================================================================
 CLI_PROMPT_META = create_prompt_metadata(
@@ -398,7 +451,7 @@ async def main():
     print("Try saying: 'match my resume' or 'search for Python jobs'\n")
 
     # Start CLI session tracking
-    session = start_tracking_session("cli_session", metadata={
+    session = start_session("cli_session", metadata={
         "mode": "interactive",
         "system_prompt_version": SYSTEM_PROMPT_VERSION
     })
@@ -450,36 +503,65 @@ async def main():
             # Extract messages for prompt breakdown (BEFORE adding assistant response)
             messages_for_breakdown = extract_messages_from_history(history)
             
+            # Create prompt breakdown for Tier 2
+            prompt_breakdown = create_prompt_breakdown_from_messages(messages_for_breakdown)
+            
             # LLM Judge evaluation (50% sampling)
-            quality_eval = await maybe_judge_response(
-                kernel,
-                "cli_chat_message",
-                userInput,
-                response_text,
-                context={"message_number": message_count}
+            quality_eval = await judge.maybe_evaluate(
+                operation="cli_chat_message",
+                prompt=userInput,
+                response=response_text,
+                llm_client=self.kernel, 
             )
             
-            # Track in Observatory - SINGLE CALL with ALL data
+            # Tier 3: Routing decision (placeholder - ready for optimization)
+            routing_decision = create_routing_decision(
+                chosen_model=DEFAULT_MODEL,  # Will be filled by observatory_config from env
+                alternative_models=["gpt-4o", "gpt-4o-mini"],
+                reasoning="CLI chat interaction - using default model",
+                complexity_score=0.5
+            ) if create_routing_decision else None
+            
+            # Tier 3: Cache metadata (placeholder - ready for optimization)
+            cache_metadata = create_cache_metadata(
+                cache_hit=False,
+                cache_key=None,
+                cache_cluster_id="cli_chat"
+            ) if create_cache_metadata else None
+            
+            # Track in Observatory - COMPLETE with ALL tiers
             track_llm_call(
-                # Core metrics (model auto-detected from env)
+                # Core metrics (Tier 1) - model auto-detected from env
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
                 agent_name="ChatAgent",
+                agent_role="orchestrator",  # Added: agent role
                 operation="cli_chat_message",
+                success=True,  # Added: explicit success
                 
-                # Prompt analysis
+                # Prompt analysis (Tier 2)
                 messages=messages_for_breakdown,
                 response_text=response_text,
                 prompt_metadata=CLI_PROMPT_META,  # Track system prompt version
+                prompt_breakdown=prompt_breakdown,  # Added: token breakdown
                 
-                # Quality evaluation
+                # Quality evaluation (Tier 2)
                 quality_evaluation=quality_eval,
+                
+                # Optimization tracking (Tier 3)
+                routing_decision=routing_decision,  # Added: routing
+                cache_metadata=cache_metadata,  # Added: cache
+                
+                # A/B Testing support (Tier 3)
+                prompt_variant_id=None,  # Added: ready for A/B tests
+                test_dataset_id=None,  # Added: ready for test runs
                 
                 # Metadata
                 metadata={
                     "message_number": message_count,
-                    "system_prompt_version": SYSTEM_PROMPT_VERSION
+                    "system_prompt_version": SYSTEM_PROMPT_VERSION,
+                    "judged": quality_eval is not None
                 }
             )
             
@@ -489,12 +571,12 @@ async def main():
             history.add_message(result)
         
         # End session successfully
-        end_tracking_session(session, success=True)
+        end_session(session, success=True)
         logger.info(f"CLI session ended successfully. Total messages: {message_count}")
         
     except Exception as e:
         # End session with error
-        end_tracking_session(session, success=False, error=str(e))
+        end_session(session, success=False, error=str(e))
         logger.error(f"CLI session ended with error: {e}")
         raise
 

@@ -1,19 +1,55 @@
 # agents/plugins/ResumeMatchingPlugin.py
+"""
+Resume Matching Plugin - Career Copilot
+UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
+"""
 
 from semantic_kernel.functions import kernel_function
 from typing import Annotated
 import json
 import logging
 import time
-
-# Observatory Integration
-from observatory_config import start_tracking_session, end_tracking_session, track_llm_call
-from observatory_config import RoutingDecision, CacheMetadata
-from llm_judge import maybe_judge_response
 import os
+
+# Observatory Integration - Complete imports
+from observatory_config import (
+    start_session,
+    end_session,
+    track_llm_call,
+    create_prompt_metadata,
+    create_prompt_breakdown,
+    create_routing_decision,
+    create_cache_metadata,
+    judge,
+    DEFAULT_MODEL,
+    PromptMetadata
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# PROMPT VERSIONING
+# =============================================================================
+QUICK_SCORE_PROMPT_VERSION = "1.0.0"
+DEEP_ANALYSIS_PROMPT_VERSION = "1.0.0"
+
+# Create PromptMetadata for resume matching operations
+QUICK_SCORE_META = create_prompt_metadata(
+    template_id="resume_matching_quick_score",
+    version=QUICK_SCORE_PROMPT_VERSION,
+    compressible_sections=["Resume", "Job Description"],
+    optimization_flags={"scoring_task": True},
+    config_version="1.0"
+) if PromptMetadata else None
+
+DEEP_ANALYSIS_META = create_prompt_metadata(
+    template_id="resume_matching_deep_analysis",
+    version=DEEP_ANALYSIS_PROMPT_VERSION,
+    compressible_sections=["Resume", "Job Description", "Instructions"],
+    optimization_flags={"semantic_matching": True},
+    config_version="1.0"
+) if PromptMetadata else None
 
 
 class ResumeMatchingPlugin:
@@ -34,9 +70,24 @@ class ResumeMatchingPlugin:
     )
     async def list_resumes(self) -> Annotated[str, "Formatted list of available resumes"]:
         """Lists all resumes from the database."""
+        start_time = time.time()
+        
         resumes = self.db.list_all_resumes()
 
         if not resumes:
+            # Track empty result
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="list_resumes",
+                success=True,
+                prompt="List all resumes",
+                response_text="No resumes found",
+                metadata={"result_count": 0, "is_db_read": True}
+            )
             return "No resumes found in the database. Please upload a resume first."
         
         response = "📄 Available resumes:\n\n"
@@ -49,6 +100,20 @@ class ResumeMatchingPlugin:
             self.memory.context.awaiting_resume_selection = True
         
         response += "\nWhich resume would you like to match?"
+        
+        # Track successful retrieval
+        track_llm_call(
+            prompt_tokens=0,
+            completion_tokens=0,
+            latency_ms=(time.time() - start_time) * 1000,
+            agent_name="ResumeMatching",
+            agent_role="retriever",
+            operation="list_resumes",
+            success=True,
+            prompt="List all resumes",
+            response_text=response[:500],
+            metadata={"result_count": len(resumes), "is_db_read": True}
+        )
         
         return response
     
@@ -66,6 +131,7 @@ class ResumeMatchingPlugin:
         """
         Store selected resume and ask about job filtering.
         """
+        start_time = time.time()
         selection_lower = selection.lower().strip()
         
         # Parse selection
@@ -82,6 +148,19 @@ class ResumeMatchingPlugin:
             try:
                 resume_index = int(selection.strip()) - 1
             except:
+                # Track parse error
+                track_llm_call(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    agent_name="ResumeMatching",
+                    agent_role="retriever",
+                    operation="select_resume_for_matching",
+                    success=False,
+                    error=f"Invalid selection: {selection}",
+                    prompt=f"Select resume: {selection}",
+                    metadata={"selection": selection}
+                )
                 return "❌ I didn't understand that selection. Please say 'first', 'second', or a number like '1' or '2'."
         
         # Get resumes from context
@@ -94,6 +173,19 @@ class ResumeMatchingPlugin:
             resumes = self.memory.context.available_resumes
         
         if not resumes or resume_index < 0 or resume_index >= len(resumes):
+            # Track invalid selection
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="select_resume_for_matching",
+                success=False,
+                error="Invalid resume index",
+                prompt=f"Select resume: {selection}",
+                metadata={"selection": selection, "resume_index": resume_index}
+            )
             return f"❌ Invalid selection. Please choose between 1 and {len(resumes) if resumes else 0}."
         
         selected_resume = resumes[resume_index]
@@ -133,6 +225,27 @@ class ResumeMatchingPlugin:
         response += f"3️⃣ Filter by keyword (e.g., 'AI Analyst', 'Data Scientist')\n\n"
         response += f"What would you like?"
         
+        # Track successful selection
+        track_llm_call(
+            prompt_tokens=0,
+            completion_tokens=0,
+            latency_ms=(time.time() - start_time) * 1000,
+            agent_name="ResumeMatching",
+            agent_role="retriever",
+            operation="select_resume_for_matching",
+            success=True,
+            prompt=f"Select resume: {selection}",
+            response_text=response[:500],
+            metadata={
+                "selection": selection,
+                "resume_id": selected_resume['id'],
+                "resume_name": selected_resume['name'],
+                "total_jobs": total_jobs,
+                "unmatched_jobs": unmatched_jobs,
+                "is_db_read": True
+            }
+        )
+        
         return response
     
     @kernel_function(
@@ -149,7 +262,21 @@ class ResumeMatchingPlugin:
         """
         Apply job filter and start matching.
         """
+        start_time = time.time()
+        
         if not self.memory or not hasattr(self.memory.context, 'selected_resume_for_matching'):
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="select_job_filter_for_matching",
+                success=False,
+                error="No resume selected",
+                prompt=f"Filter: {filter_choice}",
+                metadata={"filter_choice": filter_choice}
+            )
             return "❌ Please select a resume first. Say 'match my resume' to start."
         
         resume = self.memory.context.selected_resume_for_matching
@@ -188,12 +315,43 @@ class ResumeMatchingPlugin:
         conn.close()
         
         if not job_ids:
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="select_job_filter_for_matching",
+                success=True,
+                prompt=f"Filter: {filter_choice}",
+                response_text="No jobs found",
+                metadata={"filter_choice": filter_choice, "job_filter": job_filter, "result_count": 0}
+            )
             return f"❌ No jobs found for filter: {job_filter}. Try a different filter or add more jobs."
         
         # Store filter in context
         if self.memory:
             self.memory.context.selected_job_ids_for_matching = job_ids
             self.memory.context.awaiting_job_filter_selection = False
+        
+        # Track filter selection
+        track_llm_call(
+            prompt_tokens=0,
+            completion_tokens=0,
+            latency_ms=(time.time() - start_time) * 1000,
+            agent_name="ResumeMatching",
+            agent_role="retriever",
+            operation="select_job_filter_for_matching",
+            success=True,
+            prompt=f"Filter: {filter_choice}",
+            response_text=f"Starting match for {len(job_ids)} jobs",
+            metadata={
+                "filter_choice": filter_choice,
+                "job_filter": job_filter,
+                "result_count": len(job_ids),
+                "resume_id": resume_id
+            }
+        )
         
         # Start matching
         response = f"🚀 Starting match for **{resume['name']}** against {len(job_ids)} {job_filter}...\n\n"
@@ -214,7 +372,7 @@ class ResumeMatchingPlugin:
     async def _execute_filtered_matching(self, resume_id: int, job_ids: list) -> str:
         """Execute matching for a specific resume against filtered jobs."""
         # Start tracking the full matching session
-        session = start_tracking_session(
+        session = start_session(
             "resume_matching_workflow",
             metadata={
                 "resume_id": resume_id,
@@ -229,7 +387,7 @@ class ResumeMatchingPlugin:
             # Get resume
             resume = self.db.get_resume_by_id(resume_id)
             if not resume:
-                end_tracking_session(session, success=False, error="Resume not found")
+                end_session(session, success=False, error="Resume not found")
                 return f"❌ Error: Resume with ID {resume_id} not found."
             
             resume_text = resume.get('content', '')
@@ -243,7 +401,7 @@ class ResumeMatchingPlugin:
                     jobs.append(job)
             
             if not jobs:
-                end_tracking_session(session, success=False, error="No jobs found")
+                end_session(session, success=False, error="No jobs found")
                 return "❌ No jobs found for matching."
             
             logger.info(f"Phase 1: Quick scoring {len(jobs)} jobs...")
@@ -303,7 +461,7 @@ class ResumeMatchingPlugin:
             logger.info(f"✅ Matching complete: {total_duration:.1f}s total ({quick_score_duration:.1f}s quick + {deep_analysis_duration:.1f}s deep)")
             
             # End session successfully
-            end_tracking_session(session, success=True)
+            end_session(session, success=True)
             
             # Format response
             response = f"✅ **Matching Complete!**\n\n"
@@ -326,7 +484,7 @@ class ResumeMatchingPlugin:
             
         except Exception as e:
             logger.error(f"Error in matching workflow: {e}", exc_info=True)
-            end_tracking_session(session, success=False, error=str(e))
+            end_session(session, success=False, error=str(e))
             raise
 
     @kernel_function(
@@ -344,15 +502,53 @@ class ResumeMatchingPlugin:
         """
         Retrieves and explains a specific match from memory without re-running analysis.
         """
+        start_time = time.time()
+        
         if not self.memory:
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="explain_recent_match",
+                success=False,
+                error="No memory available",
+                prompt=f"Explain match #{match_number}",
+                metadata={"match_number": match_number}
+            )
             return "❌ No memory available to retrieve match results."
         
         recent_matches = self.memory.get_recent_matches(limit=10)
         
         if not recent_matches:
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="explain_recent_match",
+                success=False,
+                error="No recent matches found",
+                prompt=f"Explain match #{match_number}",
+                metadata={"match_number": match_number}
+            )
             return "❌ No recent match results found. Please run 'match my resume' first."
         
         if match_number < 1 or match_number > len(recent_matches):
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="explain_recent_match",
+                success=False,
+                error=f"Invalid match number: {match_number}",
+                prompt=f"Explain match #{match_number}",
+                metadata={"match_number": match_number, "available_matches": len(recent_matches)}
+            )
             return f"❌ Invalid match number. Please choose between 1 and {len(recent_matches)}."
         
         match = recent_matches[match_number - 1]
@@ -388,6 +584,25 @@ class ResumeMatchingPlugin:
         if self.memory:
             self.memory.set_current_focus(job_id=match.get('job_id'))
         
+        # Track successful retrieval
+        track_llm_call(
+            prompt_tokens=0,
+            completion_tokens=0,
+            latency_ms=(time.time() - start_time) * 1000,
+            agent_name="ResumeMatching",
+            agent_role="retriever",
+            operation="explain_recent_match",
+            success=True,
+            prompt=f"Explain match #{match_number}",
+            response_text=response[:500],
+            metadata={
+                "match_number": match_number,
+                "job_id": match.get('job_id'),
+                "job_title": match.get('title'),
+                "score": match.get('score')
+            }
+        )
+        
         return response
     
     @kernel_function(
@@ -406,15 +621,41 @@ class ResumeMatchingPlugin:
         """
         Retrieves saved match results from the database without re-running analysis.
         """
+        start_time = time.time()
+        
         if resume_id == "most_recent":
             resume = self.db.get_most_recent_resume()
             if not resume:
+                track_llm_call(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    agent_name="ResumeMatching",
+                    agent_role="retriever",
+                    operation="show_saved_matches",
+                    success=False,
+                    error="No resumes found",
+                    prompt=f"Show matches for resume_id={resume_id}",
+                    metadata={"resume_id": resume_id}
+                )
                 return "❌ No resumes found. Please upload a resume first."
             resume_id = str(resume['id'])
             resume_name = resume['name']
         else:
             resume = self.db.get_resume_by_id(resume_id)
             if not resume:
+                track_llm_call(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    agent_name="ResumeMatching",
+                    agent_role="retriever",
+                    operation="show_saved_matches",
+                    success=False,
+                    error=f"Resume not found: {resume_id}",
+                    prompt=f"Show matches for resume_id={resume_id}",
+                    metadata={"resume_id": resume_id}
+                )
                 return f"❌ Resume with ID {resume_id} not found."
             resume_name = resume['name']
         
@@ -441,6 +682,18 @@ class ResumeMatchingPlugin:
             conn.close()
             
             if not matches:
+                track_llm_call(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    agent_name="ResumeMatching",
+                    agent_role="retriever",
+                    operation="show_saved_matches",
+                    success=True,
+                    prompt=f"Show matches for resume_id={resume_id}",
+                    response_text="No saved matches found",
+                    metadata={"resume_id": resume_id, "resume_name": resume_name, "result_count": 0}
+                )
                 return f"❌ No saved matches found for '{resume_name}'.\n\nRun matching first: 'match my resume'"
             
             # Store in memory
@@ -477,9 +730,41 @@ class ResumeMatchingPlugin:
                 response += f"   🔗 {link}\n\n"
             
             response += f"\n💬 Try: 'explain match #1' or 'tell me about match #{len(matches)}'"
+            
+            # Track successful retrieval
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="show_saved_matches",
+                success=True,
+                prompt=f"Show matches for resume_id={resume_id}",
+                response_text=response[:500],
+                metadata={
+                    "resume_id": resume_id,
+                    "resume_name": resume_name,
+                    "result_count": len(matches),
+                    "is_db_read": True
+                }
+            )
+            
             return response
             
         except Exception as e:
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="ResumeMatching",
+                agent_role="retriever",
+                operation="show_saved_matches",
+                success=False,
+                error=str(e),
+                prompt=f"Show matches for resume_id={resume_id}",
+                metadata={"resume_id": resume_id}
+            )
             return f"❌ Error retrieving matches: {str(e)}"
 
 
@@ -531,7 +816,8 @@ class ResumeMatchingPlugin:
         """
         Quick scoring method - provides a fast initial score for all jobs.
         """
-        prompt = f"""You are an expert resume matcher. Score how well this resume matches the job.
+        # Build prompt with separate system and user components for tracking
+        system_prompt = """You are an expert resume matcher. Score how well this resume matches the job.
 
 Analyze:
 1. Skills alignment - Does the candidate have the required technical skills?
@@ -547,7 +833,7 @@ Provide:
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks, just raw JSON.
 
 JSON format:
-{{
+{
   "score": 85,
   "confidence": 0.75,
   "confidence_reasoning": "High confidence on skills match due to explicit mentions, but uncertain about exact experience level and education details",
@@ -555,19 +841,19 @@ JSON format:
     "Resume doesn't specify total years of experience",
     "Master's degree requirement unclear from resume"
   ],
-  "score_breakdown": {{
+  "score_breakdown": {
     "skills_match": 90,
     "experience_match": 85,
     "requirements_match": 80,
     "education_match": 85
-  }},
+  },
   "reason_bullets": [
     "Strong technical skills match with 5 years Python and AWS experience",
     "Background in AI consulting aligns with role responsibilities",
     "Missing advanced ML frameworks (TensorFlow, PyTorch) mentioned in posting",
     "Master's degree requirement not clearly met"
   ]
-}}
+}
 
 CONFIDENCE SCORING RULES:
 - confidence: 0.9-1.0 = Very confident (clear, explicit evidence)
@@ -575,15 +861,17 @@ CONFIDENCE SCORING RULES:
 - confidence: 0.5-0.69 = Low confidence (significant assumptions made)
 - confidence: <0.5 = Very uncertain (major gaps or contradictions)
 
-List specific uncertainty_factors whenever confidence < 0.85
+List specific uncertainty_factors whenever confidence < 0.85"""
 
-Resume:
+        user_message = f"""Resume:
 {resume_text[:2000]}
 
 Job:
 Title: {job.get('title', 'N/A')}
 Company: {job.get('company', 'N/A')}
 Description: {job.get('description', 'N/A')[:1500]}"""
+
+        prompt = f"{system_prompt}\n\n{user_message}"
         
         try:
             # Track this LLM call
@@ -598,38 +886,63 @@ Description: {job.get('description', 'N/A')[:1500]}"""
             prompt_tokens = len(prompt) // 4
             completion_tokens = len(result_str) // 4
             
-            # Create routing decision
-            routing = RoutingDecision(
+            # Create prompt breakdown for Tier 2
+            prompt_breakdown = create_prompt_breakdown(
+                system_prompt=system_prompt,
+                system_prompt_tokens=len(system_prompt) // 4,
+                user_message=user_message,
+                user_message_tokens=len(user_message) // 4,
+            ) if create_prompt_breakdown else None
+            
+            # Tier 3: Routing decision
+            routing_decision = create_routing_decision(
                 chosen_model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
                 alternative_models=["gpt-4o", "gpt-4"],
                 reasoning="Quick scoring - efficient model sufficient",
                 complexity_score=0.4,
-                estimated_savings=0.026
-            )
+                estimated_cost_savings=0.026
+            ) if create_routing_decision else None
             
-            # Create cache metadata
-            cache = CacheMetadata(
+            # Tier 3: Cache metadata
+            cache_metadata = create_cache_metadata(
                 cache_hit=False,
                 cache_key=None,
                 cache_cluster_id="resume_job_matching"
-            )
+            ) if create_cache_metadata else None
             
-            # Track in Observatory
+            # Track in Observatory - COMPLETE with all tiers
             track_llm_call(
+                # Core metrics (Tier 1)
                 model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
                 agent_name="ResumeMatching",
+                agent_role="analyst",
                 operation="quick_score_job",
-                routing_decision=routing,
-                cache_metadata=cache,
+                success=True,
+                
+                # Prompt content (Tier 2)
+                system_prompt=system_prompt,
+                user_message=user_message,
+                prompt=prompt,
+                response_text=result_str,
+                prompt_metadata=QUICK_SCORE_META,
+                prompt_breakdown=prompt_breakdown,
+                
+                # Optimization tracking (Tier 3)
+                routing_decision=routing_decision,
+                cache_metadata=cache_metadata,
+                
+                # A/B Testing (Tier 3)
+                prompt_variant_id=None,
+                test_dataset_id=None,
+                
+                # Metadata
                 metadata={
                     "job_id": job.get('id'),
                     "job_title": job.get('title', 'Unknown')
-                },
-                prompt=prompt,
-                response_text=result_str
+                }
             )
             
             logger.debug(f"Quick score LLM call: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
@@ -662,6 +975,22 @@ Description: {job.get('description', 'N/A')[:1500]}"""
             }
         except Exception as e:
             logger.error(f"Error in quick scoring for job {job.get('title', 'Unknown')}: {e}")
+            
+            # Track error
+            track_llm_call(
+                model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
+                prompt_tokens=len(prompt) // 4 if 'prompt' in locals() else 0,
+                completion_tokens=0,
+                latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
+                agent_name="ResumeMatching",
+                agent_role="analyst",
+                operation="quick_score_job",
+                success=False,
+                error=str(e),
+                prompt_metadata=QUICK_SCORE_META,
+                metadata={"job_id": job.get('id'), "job_title": job.get('title', 'Unknown')}
+            )
+            
             return {
                 'job_id': job.get('id'),
                 'title': job.get('title', 'Unknown Title'),
@@ -678,7 +1007,7 @@ Description: {job.get('description', 'N/A')[:1500]}"""
         Deep analysis method - provides line-by-line semantic matching with exact text highlights.
         This is SLOWER and only used for top matches.
         """
-        prompt = f"""You are an expert resume matcher. Perform semantic analysis to find connections between job requirements and resume content.
+        system_prompt = """You are an expert resume matcher. Perform semantic analysis to find connections between job requirements and resume content.
 
 🎨 CRITICAL INSTRUCTIONS FOR HIGHLIGHT TEXT:
 
@@ -694,27 +1023,27 @@ STEP-BY-STEP PROCESS:
 4. Do the same for the resume (resume_bullet and resume_highlight_text).
 
 ✅ CORRECT EXAMPLE:
-{{
+{
   "job_requirement": "Design and implement scalable data pipelines using Python, SQL, and cloud technologies.",
   "job_highlight_text": "Design and implement scalable data pipelines using Python, SQL, and cloud technologies.",
   "resume_bullet": "Built data pipelines in Python and SQL to process large datasets across AWS infrastructure.",
   "resume_highlight_text": "Built data pipelines in Python and SQL to process large datasets across AWS infrastructure.",
   "match_strength": "strong",
   "explanation": "The resume bullet clearly demonstrates experience designing and implementing data pipelines using Python and SQL, directly reflecting the job requirement."
-}}
+}
 
 ❌ WRONG EXAMPLE:
-{{
+{
   "job_requirement": "Data pipeline experience",
   "job_highlight_text": "Design and implement scalable data pipelines using Python, SQL, and cloud technologies.",
   "resume_bullet": "Created ETL processes for analytics.",
   "resume_highlight_text": "Built data pipelines in Python and SQL to process large datasets across AWS infrastructure."
-}}
+}
 
 CRITICAL: Return ONLY valid JSON. No markdown, no code blocks.
 
 Format:
-{{
+{
   "overall_score": 85,
   "confidence": 0.82,
   "confidence_reasoning": "High confidence due to explicit skill matches, but some uncertainty about experience depth",
@@ -722,21 +1051,21 @@ Format:
     "Resume mentions cloud experience but doesn't specify years",
     "Job requires 'senior level' but resume doesn't state seniority explicitly"
   ],
-  "score_breakdown": {{
+  "score_breakdown": {
     "skills_match": 90,
     "experience_match": 80,
     "requirements_match": 85,
     "education_match": 75
-  }},
+  },
   "matched_bullets": [
-    {{
+    {
       "job_requirement": "...",
       "job_highlight_text": "...",
       "resume_bullet": "...",
       "resume_highlight_text": "...",
       "match_strength": "strong/moderate/weak",
       "explanation": "..."
-    }}
+    }
   ],
   "matched_skills": ["skill1", "skill2"],
   "missing_skills": ["skill3", "skill4"],
@@ -744,7 +1073,7 @@ Format:
   "gaps": ["gap1", "gap2"],
   "improvement_suggestions": ["tip 1", "tip 2"],
   "summary": "Overall assessment"
-}}
+}
 
 CONFIDENCE SCORING RULES:
 - confidence: 0.9-1.0 = Very confident (clear, explicit evidence)
@@ -752,9 +1081,9 @@ CONFIDENCE SCORING RULES:
 - confidence: 0.5-0.69 = Low confidence (significant assumptions made)
 - confidence: <0.5 = Very uncertain (major gaps or contradictions)
 
-List specific uncertainty_factors whenever confidence < 0.85
+List specific uncertainty_factors whenever confidence < 0.85"""
 
-**RESUME:**
+        user_message = f"""**RESUME:**
 {resume_text[:4000]}
 
 **JOB:**
@@ -763,6 +1092,8 @@ Company: {job.get('company', 'N/A')}
 {job.get('description', 'N/A')[:3500]}
 
 Return 10 matched bullets with EXACT TEXT from both documents."""
+
+        prompt = f"{system_prompt}\n\n{user_message}"
         
         try:
             # Track this LLM call
@@ -777,71 +1108,79 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
             prompt_tokens = len(prompt) // 4
             completion_tokens = len(result_str) // 4
             
-            # Create routing decision
-            routing = RoutingDecision(
+            # Create prompt breakdown for Tier 2
+            prompt_breakdown = create_prompt_breakdown(
+                system_prompt=system_prompt,
+                system_prompt_tokens=len(system_prompt) // 4,
+                user_message=user_message,
+                user_message_tokens=len(user_message) // 4,
+            ) if create_prompt_breakdown else None
+            
+            # LLM Judge evaluation (50% sampling)
+            quality_eval = await judge.maybe_evaluate(
+                operation="deep_analyze_job",
+                prompt=prompt[:5000],
+                response=result_str[:5000],
+                llm_client=self.kernel, 
+            )
+            
+            # Tier 3: Routing decision
+            routing_decision = create_routing_decision(
                 chosen_model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
                 alternative_models=["gpt-4o", "gpt-4"],
                 reasoning="Deep analysis - complex reasoning task",
                 complexity_score=0.7,
-                estimated_savings=0.010
-            )
+                estimated_cost_savings=0.010
+            ) if create_routing_decision else None
             
-            # Create cache metadata
-            cache = CacheMetadata(
+            # Tier 3: Cache metadata
+            cache_metadata = create_cache_metadata(
                 cache_hit=False,
                 cache_key=None,
                 cache_cluster_id="resume_job_deep_analysis"
-            )
+            ) if create_cache_metadata else None
             
-            # Track in Observatory
+            # Track in Observatory - COMPLETE with all tiers (single call)
             track_llm_call(
+                # Core metrics (Tier 1)
                 model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
                 agent_name="ResumeMatching",
+                agent_role="analyst",
                 operation="deep_analyze_job",
-                routing_decision=routing,
-                cache_metadata=cache,
+                success=True,
+                
+                # Prompt content (Tier 2)
+                system_prompt=system_prompt,
+                user_message=user_message,
+                prompt=prompt,
+                response_text=result_str,
+                prompt_metadata=DEEP_ANALYSIS_META,
+                prompt_breakdown=prompt_breakdown,
+                
+                # Quality evaluation (Tier 2)
+                quality_evaluation=quality_eval,
+                
+                # Optimization tracking (Tier 3)
+                routing_decision=routing_decision,
+                cache_metadata=cache_metadata,
+                
+                # A/B Testing (Tier 3)
+                prompt_variant_id=None,
+                test_dataset_id=None,
+                
+                # Metadata
                 metadata={
                     "job_id": job.get('id'),
                     "job_title": job.get('title', 'Unknown'),
-                    "original_score": original_score
-                },
-                prompt=prompt,
-                response_text=result_str
+                    "original_score": original_score,
+                    "judged": quality_eval is not None
+                }
             )
             
             logger.debug(f"Deep analysis LLM call: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
-            
-            # NEW: LLM Judge evaluation (50% sampling)
-            quality_eval = await maybe_judge_response(
-                self.kernel,
-                "deep_analyze_job",
-                prompt,
-                result_str
-            )
-            
-            # If judged, track again with quality
-            if quality_eval:
-                track_llm_call(
-                    model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    latency_ms=latency_ms,
-                    agent_name="ResumeMatching",
-                    operation="deep_analyze_job",
-                    routing_decision=routing,
-                    cache_metadata=cache,
-                    metadata={
-                        "job_id": job.get('id'),
-                        "job_title": job.get('title', 'Unknown'),
-                        "original_score": original_score
-                    },
-                    prompt=prompt,
-                    response_text=result_str,
-                    quality_evaluation=quality_eval  # ← Add quality
-                )
             
             # Parse response (rest of the existing code stays the same)
             if '```json' in result_str:
@@ -880,6 +1219,22 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
             
         except Exception as e:
             logger.error(f"Deep analysis error for '{job.get('title', 'Unknown')}': {e}", exc_info=True)
+            
+            # Track error
+            track_llm_call(
+                model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
+                prompt_tokens=len(prompt) // 4 if 'prompt' in locals() else 0,
+                completion_tokens=0,
+                latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
+                agent_name="ResumeMatching",
+                agent_role="analyst",
+                operation="deep_analyze_job",
+                success=False,
+                error=str(e),
+                prompt_metadata=DEEP_ANALYSIS_META,
+                metadata={"job_id": job.get('id'), "job_title": job.get('title', 'Unknown')}
+            )
+            
             return {
                 'job_id': job.get('id'),
                 'title': job.get('title', 'Unknown Title'),

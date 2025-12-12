@@ -1,156 +1,340 @@
 """
 Observatory Configuration - Career Copilot
-UPDATED: Discovery Mode - Tier 2 metrics, no auto-routing defaults
+Location: career-copilot/observatory_config.py
+
+This is the ONLY file needed in your application to use Observatory.
+All logic lives in the observatory package - this just configures it.
+
+Usage:
+    from observatory_config import obs, judge, cache, router, prompts, track_call
+    
+    # In your plugin
+    quality = await judge.maybe_evaluate(operation, prompt, response, client)
+    track_call(model, tokens, latency, operation=op, quality_evaluation=quality)
 """
 
 import os
-import sys
+from dotenv import load_dotenv
 
-try:
-    from observatory import Observatory, ModelProvider, AgentRole
-    from observatory.models import RoutingDecision, CacheMetadata, QualityEvaluation
-    print("✅ Observatory package imported successfully")
-except ImportError as e:
-    print(f"❌ ERROR: Cannot import Observatory package")
-    print(f"   {e}")
-    sys.exit(1)
+load_dotenv()
 
-OBSERVATORY_DB_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "ai-agent-observatory",
-    "observatory.db"
+# =============================================================================
+# IMPORT FROM OBSERVATORY SDK
+# =============================================================================
+
+from observatory import (
+    # Core
+    Observatory,
+    ModelProvider,
+    
+    # SDK Components
+    LLMJudge,
+    CacheManager,
+    ModelRouter,
+    PromptManager,
+    
+    # Convenience functions
+    track_llm_call,
+    create_routing_decision,
+    create_cache_metadata,
+    create_quality_evaluation,
+    create_prompt_metadata,
+    create_prompt_breakdown,
+    estimate_tokens,
 )
-OBSERVATORY_DB_PATH = os.path.abspath(OBSERVATORY_DB_PATH)
 
-if not os.path.exists(os.path.dirname(OBSERVATORY_DB_PATH)):
-    print(f"⚠️ WARNING: Observatory folder not found at expected location")
-    print(f"   Expected: {os.path.dirname(OBSERVATORY_DB_PATH)}")
+# =============================================================================
+# PHASE CONFIGURATION
+# =============================================================================
 
+# Set via environment variable or .env file:
+#   OBSERVATORY_PHASE=baseline   (Phase 1: Track only, no optimizations)
+#   OBSERVATORY_PHASE=optimized  (Phase 2: Routing, caching, quality enabled)
+#
+# Or run with: OBSERVATORY_PHASE=optimized python your_app.py
+
+CURRENT_PHASE = os.getenv("OBSERVATORY_PHASE", "baseline")
+
+# Validate
+if CURRENT_PHASE not in ("baseline", "optimized"):
+    print(f"⚠️ Invalid OBSERVATORY_PHASE '{CURRENT_PHASE}', defaulting to 'baseline'")
+    CURRENT_PHASE = "baseline"
+
+# =============================================================================
+# PROJECT CONFIGURATION
+# =============================================================================
+
+PROJECT_NAME = "Career Copilot"
+DEFAULT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
+DEFAULT_PROVIDER = ModelProvider.AZURE
+
+# Database path - adjust to your Observatory location
+OBSERVATORY_DB_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "ai-agent-observatory", "observatory.db")
+)
 os.environ['DATABASE_URL'] = f"sqlite:///{OBSERVATORY_DB_PATH}"
 
+print(f"📦 Observatory Config: {PROJECT_NAME}")
+print(f"   Database: {OBSERVATORY_DB_PATH}")
+print(f"   Model: {DEFAULT_MODEL}")
+print(f"   Phase: {CURRENT_PHASE}")
+
+# =============================================================================
+# INITIALIZE OBSERVATORY
+# =============================================================================
+
 obs = Observatory(
-    project_name="Career Copilot",
-    enabled=True
+    project_name=PROJECT_NAME,
+    enabled=True,
 )
 
-print(f"✅ Observatory initialized for Career Copilot")
-print(f"   Database: {OBSERVATORY_DB_PATH}")
-print(f"   Project: Career Copilot")
+# =============================================================================
+# CONFIGURE LLM JUDGE
+# =============================================================================
 
+judge = LLMJudge(
+    observatory=obs,
+    
+    # Operations to evaluate
+    operations={
+        "improve_bullet",
+        "generate_change_report",
+        "deep_analyze_job",
+        "deep_analyze_with_guidance",
+        "critique_match",
+        "streamlit_chat",
+        "cli_chat_message",
+    },
+    
+    # Skip low-value operations
+    skip_operations={
+        "generate_sql",
+        "job_search",
+        "save_jobs",
+        "list_resumes",
+        "quick_score_job",
+    },
+    
+    # Evaluate 50% of judge-worthy calls
+    sample_rate=0.5,
+    
+    # Domain-specific criteria
+    criteria={
+        "relevance": 0.25,
+        "accuracy": 0.25,
+        "helpfulness": 0.25,
+        "professionalism": 0.15,
+        "clarity": 0.10,
+    },
+    
+    # Context for judge prompts
+    domain_context="career advice, resume optimization, and job matching",
+    
+    # Use same model as main app
+    judge_model=DEFAULT_MODEL,
+    
+    # Track judge calls in Observatory
+    track_judge_calls=True,
+)
 
-def start_tracking_session(operation_type: str, metadata: dict = None):
-    """Start a tracking session for an operation."""
-    if metadata:
-        return obs.start_session(operation_type, **metadata)
-    else:
-        return obs.start_session(operation_type)
+# =============================================================================
+# CONFIGURE CACHE MANAGER
+# =============================================================================
 
+cache = CacheManager(
+    observatory=obs,
+    
+    # Operations to cache with TTL settings
+    operations={
+        "find_jobs": {"ttl": 3600, "normalize": True, "cluster_id": "job_searches"},
+        "query_database": {"ttl": 300, "normalize": True, "cluster_id": "db_queries"},
+        "get_job_details": {"ttl": 7200, "normalize": False, "cluster_id": "job_details"},
+        "list_resumes": {"ttl": 600, "normalize": False, "cluster_id": "resume_list"},
+    },
+    
+    # Defaults
+    default_ttl=3600,
+    max_entries=1000,
+    normalize_prompts=True,
+)
 
-def end_tracking_session(session, success: bool = True, error: str = None):
-    """End a tracking session."""
-    if session:
-        if not success:
-            session.success = False
-        if error:
-            session.error = error
-    obs.end_session(session)
+# =============================================================================
+# CONFIGURE MODEL ROUTER
+# =============================================================================
 
+router = ModelRouter(
+    observatory=obs,
+    default_model=DEFAULT_MODEL,
+    fallback_model="gpt-4o-mini",
+    
+    # Routing rules (evaluated in order)
+    rules=[
+        # Simple retrieval operations → cheap model
+        {
+            "name": "simple_retrieval",
+            "operations": ["find_jobs", "list_resumes", "get_job_details", "get_saved_jobs"],
+            "model": "gpt-4o-mini",
+            "reason": "Simple retrieval - cheap model sufficient",
+        },
+        
+        # Database queries → cheap model
+        {
+            "name": "db_queries",
+            "operations": ["query_database", "generate_sql"],
+            "model": "gpt-4o-mini",
+            "reason": "SQL generation - structured output",
+        },
+        
+        # Complex analysis → premium model
+        {
+            "name": "complex_analysis",
+            "operations": ["deep_analyze_job", "deep_analyze_with_guidance", "critique_match"],
+            "model": "gpt-4o",
+            "reason": "Complex analysis requires premium model",
+        },
+        
+        # Self-improving operations → premium model
+        {
+            "name": "self_improving",
+            "operations": ["improve_bullet", "generate_change_report"],
+            "model": "gpt-4o",
+            "reason": "Quality-critical content generation",
+        },
+        
+        # High complexity → premium model
+        {
+            "name": "high_complexity",
+            "min_complexity": 0.7,
+            "model": "gpt-4o",
+            "reason": "High complexity score detected",
+        },
+        
+        # Low token count → cheap model
+        {
+            "name": "short_requests",
+            "max_tokens": 500,
+            "model": "gpt-4o-mini",
+            "reason": "Short request - cheap model sufficient",
+        },
+    ],
+)
 
-def track_llm_call(
-    model_name: str,
-    prompt_tokens: int,
-    completion_tokens: int,
-    latency_ms: float,
+# =============================================================================
+# CONFIGURE PROMPT MANAGER (A/B TESTING)
+# =============================================================================
+
+prompts = PromptManager(observatory=obs)
+
+# Example: Register system prompt with variants
+# prompts.register(
+#     template_id="career_copilot_system",
+#     version="2.0.0",
+#     content=SYSTEM_PROMPT,  # Your main system prompt
+#     variants={
+#         "control": SYSTEM_PROMPT,
+#         "concise": CONCISE_SYSTEM_PROMPT,
+#         "structured": STRUCTURED_SYSTEM_PROMPT,
+#     },
+#     experiment_id="system_prompt_test_dec_2024",
+#     weights={"control": 0.5, "concise": 0.25, "structured": 0.25},
+#     description="Testing different system prompt styles",
+# )
+
+# =============================================================================
+# CONVENIENCE WRAPPER: track_call
+# =============================================================================
+
+def track_call(
+    model_name: str = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    latency_ms: float = 0,
     agent_name: str = None,
     operation: str = None,
-    metadata: dict = None,
     prompt: str = None,
     response_text: str = None,
-    routing_decision = None,
-    cache_metadata = None,
-    quality_evaluation = None,
-    required_retry: bool = False  # NEW - Track if this call needed retry
+    success: bool = True,
+    error: str = None,
+    routing_decision=None,
+    cache_metadata=None,
+    quality_evaluation=None,
+    prompt_breakdown=None,
+    prompt_metadata=None,
+    prompt_variant_id: str = None,
+    metadata: dict = None,
 ):
     """
-    Record an LLM call in Observatory.
-    Creates a temporary session if none exists.
+    Simplified tracking function for Career Copilot.
     
-    DISCOVERY MODE: Automatically adds Tier 2 metrics to metadata
+    Uses default model and provider from config.
     """
-    # Initialize metadata
-    enhanced_metadata = metadata or {}
-    
-    # TIER 2 METRICS - Auto-calculate from available data
-    if prompt:
-        enhanced_metadata['prompt_length_chars'] = len(prompt)
-    
-    if response_text:
-        enhanced_metadata['response_length_chars'] = len(response_text)
-    
-    # Track retry flag
-    if required_retry:
-        enhanced_metadata['required_retry'] = True
-    
-    # Check if there's an active session
-    session_started = False
-    try:
-        # Try to record with existing session
-        obs.record_call(
-            provider=ModelProvider.AZURE,
-            model_name=model_name,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            latency_ms=latency_ms,
-            agent_name=agent_name,
-            operation=operation,
-            metadata=enhanced_metadata,
-            prompt=prompt,
-            response_text=response_text,
-            routing_decision=routing_decision,  # None in discovery mode
-            cache_metadata=cache_metadata,      # None in discovery mode
-            quality_evaluation=quality_evaluation
-        )
-    except ValueError as e:
-        if "No active session" in str(e):
-            # No session exists - create a temporary one
-            temp_session = obs.start_session("llm_call")
-            session_started = True
-            
-            # Record the call
-            obs.record_call(
-                provider=ModelProvider.AZURE,
-                model_name=model_name,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                latency_ms=latency_ms,
-                agent_name=agent_name,
-                operation=operation,
-                metadata=enhanced_metadata,
-                prompt=prompt,
-                response_text=response_text,
-                routing_decision=routing_decision,
-                cache_metadata=cache_metadata,
-                quality_evaluation=quality_evaluation
-            )
-            
-            # End the temporary session
-            obs.end_session(temp_session)
-        else:
-            raise
+    return track_llm_call(
+        observatory=obs,
+        model_name=model_name or DEFAULT_MODEL,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=latency_ms,
+        provider=DEFAULT_PROVIDER,
+        agent_name=agent_name,
+        operation=operation,
+        prompt=prompt,
+        response_text=response_text,
+        success=success,
+        error=error,
+        routing_decision=routing_decision,
+        cache_metadata=cache_metadata,
+        quality_evaluation=quality_evaluation,
+        prompt_breakdown=prompt_breakdown,
+        prompt_metadata=prompt_metadata,
+        prompt_variant_id=prompt_variant_id,
+        metadata=metadata,
+    )
 
 
-AGENT_ROLE_MAP = {
-    "ResumeMatching": AgentRole.ANALYST,
-    "JobPlugin": AgentRole.ANALYST,
-    "DatabaseQueryPlugin": AgentRole.ANALYST,
-    "ResumeTailoring": AgentRole.FIXER,
-    "SelfImprovingMatch": AgentRole.REVIEWER,
-    "ResumePreprocessor": AgentRole.ANALYST,
-    "JobPreprocessor": AgentRole.ANALYST,
-}
+# =============================================================================
+# SESSION HELPERS
+# =============================================================================
+
+def start_session(operation_type: str = None, **metadata):
+    """Start a tracking session."""
+    return obs.start_session(operation_type, **metadata)
 
 
-def get_agent_role(plugin_name: str) -> AgentRole:
-    """Get the appropriate AgentRole for a plugin."""
-    return AGENT_ROLE_MAP.get(plugin_name, AgentRole.ANALYST)
+def end_session(session, success: bool = True, error: str = None):
+    """End a tracking session."""
+    if session:
+        session.success = success
+        session.error = error
+    return obs.end_session(session)
+
+
+# =============================================================================
+# EXPORTS
+# =============================================================================
+
+__all__ = [
+    # Configured instances
+    'obs',
+    'judge',
+    'cache',
+    'router',
+    'prompts',
+    
+    # Config values
+    'PROJECT_NAME',
+    'DEFAULT_MODEL',
+    'DEFAULT_PROVIDER',
+    
+    # Functions
+    'track_call',
+    'start_session',
+    'end_session',
+    
+    # Re-exported for convenience
+    'create_routing_decision',
+    'create_cache_metadata',
+    'create_quality_evaluation',
+    'create_prompt_metadata',
+    'create_prompt_breakdown',
+    'estimate_tokens',
+]

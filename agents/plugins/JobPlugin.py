@@ -1,10 +1,44 @@
 # agents/plugins/JobPlugin.py
-import logging
-import json
+"""
+Job Plugin - Career Copilot
+UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
+"""
+
 from semantic_kernel.functions import kernel_function
 from typing import Annotated
+import json
+import logging
+import time
+import os
+
 from services.job_api import search_jobs
 from services.db import save_jobs
+
+from observatory_config import (
+    start_session,
+    end_session,
+    track_llm_call,
+    create_prompt_metadata,
+    create_prompt_breakdown,
+    create_routing_decision,
+    create_cache_metadata,
+    judge,
+    DEFAULT_MODEL,
+    PromptMetadata
+)
+
+# =============================================================================
+# PROMPT VERSIONING (for API operations)
+# =============================================================================
+JOB_SEARCH_VERSION = "1.0.0"
+
+JOB_SEARCH_META = create_prompt_metadata(
+    template_id="job_plugin_search",
+    version=JOB_SEARCH_VERSION,
+    compressible_sections=[],
+    optimization_flags={"api_call": True, "cacheable": True},
+    config_version="1.0"
+) if PromptMetadata else None
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -51,17 +85,68 @@ class JobPlugin:
         """
 
         logger.info(f"Searching for jobs: query='{query}', location='{location}', num_results={num_results}")
+        
+        start_time = time.time()
 
         try:
             # Fetch jobs from API
             jobs = search_jobs(query, location, num_results)
+            
+            latency_ms = (time.time() - start_time) * 1000
             logger.info(f"Retrieved {len(jobs)} job(s) for '{query}' in {location}")
 
             if not jobs:
-                return json.dumps({
+                result = json.dumps({
                     "summary": f"No jobs found for '{query}' in {location}. Try different keywords or location.",
                     "jobs": []
                 })
+                
+                # Tier 3: Cache metadata (ready for optimization)
+                cache_metadata = create_cache_metadata(
+                    cache_hit=False,
+                    cache_key=f"job_search:{query.lower()}:{location.lower()}",
+                    cache_cluster_id="job_search"
+                ) if create_cache_metadata else None
+                
+                # Track API call - COMPLETE with all tiers
+                track_llm_call(
+                    # Core metrics (Tier 1)
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=latency_ms,
+                    agent_name="JobPlugin",
+                    agent_role="retriever",  # Added: agent role
+                    operation="find_jobs",
+                    success=True,  # Added: explicit success
+                    
+                    # Prompt content (Tier 2) - for API calls
+                    prompt=f"Search: {query} in {location}",
+                    response_text=result[:300],
+                    prompt_metadata=JOB_SEARCH_META,
+                    prompt_breakdown=None,  # No prompt breakdown for API calls
+                    
+                    # Quality (Tier 2) - N/A for API calls
+                    quality_evaluation=None,
+                    
+                    # Optimization tracking (Tier 3)
+                    routing_decision=None,  # No LLM routing for API calls
+                    cache_metadata=cache_metadata,  # Added: cache
+                    
+                    # A/B Testing support (Tier 3)
+                    prompt_variant_id=None,  # Added: ready for A/B tests
+                    test_dataset_id=None,  # Added: ready for test runs
+                    
+                    # Metadata
+                    metadata={
+                        "query": query,
+                        "location": location,
+                        "num_results_requested": num_results,
+                        "jobs_found": 0,
+                        "is_api_call": True
+                    }
+                )
+                
+                return result
 
             # Store jobs in context for later reference and saving
             if self.context:
@@ -79,13 +164,89 @@ class JobPlugin:
 
             summary_text = "\n".join(job_summaries)
 
-            return json.dumps({
+            result = json.dumps({
                 "summary": f"Found {len(jobs)} '{query}' jobs in {location}:\n{summary_text}",
                 "jobs": jobs
             })
+            
+            # Tier 3: Cache metadata (ready for optimization)
+            cache_metadata = create_cache_metadata(
+                cache_hit=False,
+                cache_key=f"job_search:{query.lower()}:{location.lower()}",
+                cache_cluster_id="job_search"
+            ) if create_cache_metadata else None
+            
+            # Track API call - COMPLETE with all tiers
+            track_llm_call(
+                # Core metrics (Tier 1)
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=latency_ms,
+                agent_name="JobPlugin",
+                agent_role="retriever",  # Added: agent role
+                operation="find_jobs",
+                success=True,  # Added: explicit success
+                
+                # Prompt content (Tier 2)
+                prompt=f"Search: {query} in {location}",
+                response_text=result[:500],
+                prompt_metadata=JOB_SEARCH_META,
+                prompt_breakdown=None,
+                
+                # Quality (Tier 2)
+                quality_evaluation=None,
+                
+                # Optimization tracking (Tier 3)
+                routing_decision=None,
+                cache_metadata=cache_metadata,  # Added: cache
+                
+                # A/B Testing support (Tier 3)
+                prompt_variant_id=None,  # Added
+                test_dataset_id=None,  # Added
+                
+                # Metadata
+                metadata={
+                    "query": query,
+                    "location": location,
+                    "num_results_requested": num_results,
+                    "jobs_found": len(jobs),
+                    "is_api_call": True
+                }
+            )
+            
+            print(f"📊 Tracked job search: {latency_ms:.0f}ms, {len(jobs)} jobs found")
+
+            return result
 
         except Exception as e:
             logger.error(f"Error in JobPlugin.find_jobs: {e}", exc_info=True)
+            
+            # Track failed call - COMPLETE
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="JobPlugin",
+                agent_role="retriever",
+                operation="find_jobs",
+                success=False,  # Failed
+                error=str(e),
+                prompt=f"Search: {query} in {location}",
+                prompt_metadata=JOB_SEARCH_META,
+                prompt_breakdown=None,
+                quality_evaluation=None,
+                routing_decision=None,
+                cache_metadata=None,
+                prompt_variant_id=None,
+                test_dataset_id=None,
+                metadata={
+                    "query": query,
+                    "location": location,
+                    "is_api_call": True,
+                    "error_type": type(e).__name__
+                }
+            )
+            
             return json.dumps({
                 "summary": f"❌ Job search failed: {str(e)}. Please try again or contact support.",
                 "jobs": []
@@ -105,6 +266,8 @@ class JobPlugin:
         """
         Retrieve details for a specific job from the last search.
         """
+        start_time = time.time()
+        
         if not self.context or not hasattr(self.context, 'last_searched_jobs'):
             return "❌ No recent job search found. Please search for jobs first."
         
@@ -124,6 +287,43 @@ class JobPlugin:
         details += f"🔗 **Apply:** {job.get('link', 'No link available')}\n\n"
         details += f"**Description:**\n{job.get('description', 'No description available')}"
         
+        # Track retrieval operation - COMPLETE
+        track_llm_call(
+            # Core metrics (Tier 1)
+            prompt_tokens=0,
+            completion_tokens=0,
+            latency_ms=(time.time() - start_time) * 1000,
+            agent_name="JobPlugin",
+            agent_role="retriever",  # Added
+            operation="get_job_details",
+            success=True,  # Added
+            
+            # Prompt content (Tier 2)
+            prompt=f"Get details for job #{job_number}",
+            response_text=details[:300],
+            prompt_metadata=None,
+            prompt_breakdown=None,
+            
+            # Quality (Tier 2)
+            quality_evaluation=None,
+            
+            # Optimization tracking (Tier 3)
+            routing_decision=None,
+            cache_metadata=None,
+            
+            # A/B Testing support (Tier 3)
+            prompt_variant_id=None,
+            test_dataset_id=None,
+            
+            # Metadata
+            metadata={
+                "job_number": job_number,
+                "job_title": job.get('title'),
+                "job_company": job.get('company'),
+                "is_retrieval": True
+            }
+        )
+        
         return details
 
     @kernel_function(
@@ -140,6 +340,8 @@ class JobPlugin:
         """
         Save specific jobs or all jobs from the last search.
         """
+        start_time = time.time()
+        
         if not self.context or not hasattr(self.context, 'last_searched_jobs'):
             return "❌ No recent job search found. Please search for jobs first."
         
@@ -168,9 +370,51 @@ class JobPlugin:
         logger.info(f"Saved {len(jobs_to_save)} jobs to database")
         
         if job_numbers.lower() == "all":
-            return f"✅ Saved all {len(jobs_to_save)} '{query}' jobs in {location}."
+            result = f"✅ Saved all {len(jobs_to_save)} '{query}' jobs in {location}."
         else:
-            return f"✅ Saved {len(jobs_to_save)} selected job(s): #{', #'.join(map(str, job_indices))}."
+            result = f"✅ Saved {len(jobs_to_save)} selected job(s): #{', #'.join(map(str, job_indices))}."
+        
+        # Track database write - COMPLETE
+        track_llm_call(
+            # Core metrics (Tier 1)
+            prompt_tokens=0,
+            completion_tokens=0,
+            latency_ms=(time.time() - start_time) * 1000,
+            agent_name="JobPlugin",
+            agent_role="writer",  # Added
+            operation="save_searched_jobs",
+            success=True,  # Added
+            
+            # Prompt content (Tier 2)
+            prompt=f"Save jobs: {job_numbers}",
+            response_text=result,
+            prompt_metadata=None,
+            prompt_breakdown=None,
+            
+            # Quality (Tier 2)
+            quality_evaluation=None,
+            
+            # Optimization tracking (Tier 3)
+            routing_decision=None,
+            cache_metadata=None,
+            
+            # A/B Testing support (Tier 3)
+            prompt_variant_id=None,
+            test_dataset_id=None,
+            
+            # Metadata
+            metadata={
+                "job_numbers_requested": job_numbers,
+                "jobs_saved": len(jobs_to_save),
+                "query": query,
+                "location": location,
+                "is_db_write": True
+            }
+        )
+        
+        print(f"📊 Tracked job save: {len(jobs_to_save)} jobs saved")
+        
+        return result
 
     @kernel_function(
         name="get_saved_jobs",
@@ -183,6 +427,8 @@ class JobPlugin:
         """
         Retrieve saved jobs from the database.
         """
+        start_time = time.time()
+        
         try:
             import sqlite3
             from services.db import DB_PATH
@@ -201,10 +447,37 @@ class JobPlugin:
             conn.close()
             
             if not rows:
-                return json.dumps({
+                result = json.dumps({
                     "summary": "No saved jobs found in the database.",
                     "jobs": []
                 })
+                
+                # Track database read - COMPLETE
+                track_llm_call(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    agent_name="JobPlugin",
+                    agent_role="retriever",
+                    operation="get_saved_jobs",
+                    success=True,
+                    prompt=f"Get saved jobs (limit={limit})",
+                    response_text=result[:300],
+                    prompt_metadata=None,
+                    prompt_breakdown=None,
+                    quality_evaluation=None,
+                    routing_decision=None,
+                    cache_metadata=None,
+                    prompt_variant_id=None,
+                    test_dataset_id=None,
+                    metadata={
+                        "limit": limit,
+                        "jobs_returned": 0,
+                        "is_db_read": True
+                    }
+                )
+                
+                return result
             
             jobs = []
             for row in rows:
@@ -217,13 +490,66 @@ class JobPlugin:
                     "description": row[5][:200] + "..." if row[5] and len(row[5]) > 200 else row[5]
                 })
             
-            return json.dumps({
+            result = json.dumps({
                 "summary": f"Found {len(jobs)} saved jobs in the database.",
                 "jobs": jobs
             })
             
+            # Track database read - COMPLETE
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="JobPlugin",
+                agent_role="retriever",
+                operation="get_saved_jobs",
+                success=True,
+                prompt=f"Get saved jobs (limit={limit})",
+                response_text=result[:300],
+                prompt_metadata=None,
+                prompt_breakdown=None,
+                quality_evaluation=None,
+                routing_decision=None,
+                cache_metadata=None,
+                prompt_variant_id=None,
+                test_dataset_id=None,
+                metadata={
+                    "limit": limit,
+                    "jobs_returned": len(jobs),
+                    "is_db_read": True
+                }
+            )
+            
+            return result
+            
         except Exception as e:
             logger.error(f"Error retrieving saved jobs: {e}", exc_info=True)
+            
+            # Track failed call - COMPLETE
+            track_llm_call(
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                agent_name="JobPlugin",
+                agent_role="retriever",
+                operation="get_saved_jobs",
+                success=False,
+                error=str(e),
+                prompt=f"Get saved jobs (limit={limit})",
+                prompt_metadata=None,
+                prompt_breakdown=None,
+                quality_evaluation=None,
+                routing_decision=None,
+                cache_metadata=None,
+                prompt_variant_id=None,
+                test_dataset_id=None,
+                metadata={
+                    "limit": limit,
+                    "is_db_read": True,
+                    "error_type": type(e).__name__
+                }
+            )
+            
             return json.dumps({
                 "summary": f"❌ Error retrieving saved jobs: {str(e)}",
                 "jobs": []
