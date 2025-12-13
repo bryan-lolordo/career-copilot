@@ -138,7 +138,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             operation="streamlit_chat",
             prompt=message,
             response=response_text,
-            llm_client=self.kernel, 
+            llm_client=kernel, 
         )
         
         # Tier 3: Routing decision (placeholder - ready for optimization)

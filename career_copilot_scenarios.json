@@ -1,0 +1,146 @@
+[
+  {
+    "scenario_id": "job_search_explore_save",
+    "description": "User searches for jobs, explores specific ones, and saves a subset",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "find me ai engineer jobs in chicago",
+        "expected_tools": ["JobPlugin.find_jobs"],
+        "assertions": ["returns ~10 jobs", "stores last_searched_jobs in memory"]
+      },
+      {
+        "turn": 2,
+        "user": "tell me more about job number 3",
+        "expected_tools": ["JobPlugin.get_job_details"],
+        "assertions": ["references last search", "returns details for job index 3"]
+      },
+      {
+        "turn": 3,
+        "user": "what are the key requirements for job 6",
+        "expected_tools": ["JobPlugin.get_job_details"],
+        "assertions": ["references last search", "extracts requirements from job 6"]
+      },
+      {
+        "turn": 4,
+        "user": "save jobs 3, 6, 8 and 9",
+        "expected_tools": ["JobPlugin.save_searched_jobs"],
+        "assertions": ["saves only specified jobs", "confirms saved count"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "resume_matching_guided_flow",
+    "description": "User matches resume, handles empty unmatched set, and recovers",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "match my resume",
+        "expected_tools": ["ResumeMatching.list_resumes"],
+        "assertions": ["lists available resumes"]
+      },
+      {
+        "turn": 2,
+        "user": "the first one",
+        "expected_tools": ["ResumeMatching.select_resume_for_matching"],
+        "assertions": ["stores selected resume in context"]
+      },
+      {
+        "turn": 3,
+        "user": "match against all saved jobs",
+        "expected_tools": ["ResumeMatching.select_job_filter_for_matching"],
+        "assertions": ["filters by all jobs", "executes matching"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "top_matches_explain_iterate",
+    "description": "User explores match rankings and drills into reasoning",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me my top matches",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns ranked list"]
+      },
+      {
+        "turn": 2,
+        "user": "explain why I matched well with the top one",
+        "expected_tools": ["ResumeMatching.explain_recent_match"],
+        "assertions": ["does not rerun matching", "explains strengths and gaps"]
+      },
+      {
+        "turn": 3,
+        "user": "what experience am I lacking for that role",
+        "expected_tools": [],
+        "assertions": ["references missing skills", "ties gaps to job requirements"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "resume_tailoring_from_match",
+    "description": "User asks for resume improvements based on a specific match",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me my recent matches",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns matches"]
+      },
+      {
+        "turn": 2,
+        "user": "help me improve my resume for the top match",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["uses job context", "addresses missing skills", "returns bullet options"]
+      },
+      {
+        "turn": 3,
+        "user": "what gaps does this address",
+        "expected_tools": [],
+        "assertions": ["maps bullets to specific gap categories"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "database_queries",
+    "description": "User asks various database questions",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "how many jobs have I saved",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns count"]
+      },
+      {
+        "turn": 2,
+        "user": "show me jobs from tech companies",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by company type"]
+      },
+      {
+        "turn": 3,
+        "user": "which ones are remote",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by remote"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "self_improving_match",
+    "description": "Agent critiques and improves its own match analysis",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show my top match",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns top match"]
+      },
+      {
+        "turn": 2,
+        "user": "can you re-evaluate and improve the analysis for this match",
+        "expected_tools": ["SelfImprovingMatch.self_improve_single_match"],
+        "assertions": ["runs refinement iterations", "improves analysis"]
+      }
+    ]
+  }
+]
