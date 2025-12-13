@@ -22,7 +22,11 @@ from observatory_config import (
     create_cache_metadata,
     judge,
     DEFAULT_MODEL,
-    PromptMetadata
+    PromptMetadata,
+    ModelConfig,
+    StreamingMetrics,
+    ExperimentMetadata,
+    ErrorDetails,
 )
 
 # Configure logging
@@ -62,6 +66,10 @@ class ResumeTailoringPlugin:
         """
         self.kernel = kernel
         self.memory = memory
+
+        # Create execution settings once per plugin instance
+        from agents.semantic_kernel_setup import create_execution_settings
+        self.exec_settings = create_execution_settings()
     
     @kernel_function(
         name="improve_resume_bullet",
@@ -208,6 +216,21 @@ Required JSON format:
                 prompt_variant_id=None,  # Added: ready for A/B tests
                 test_dataset_id=None,  # Added: ready for test runs
                 
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+
+                # NEW: Model configuration
+                temperature=0.7,  # Creative writing for resume improvement
+                max_tokens=None,  # Keep None to see inefficiencies
+                
+                # NEW: Token breakdown (top-level)
+                system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+                user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 # Metadata
                 metadata={
                     "job_title": job_title,
@@ -215,7 +238,9 @@ Required JSON format:
                     "user_request": user_request[:100],
                     "has_matched_skills": bool(matched_skills),
                     "has_missing_skills": bool(missing_skills),
-                    "judged": quality_eval is not None
+                    "judged": quality_eval is not None,
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -263,7 +288,10 @@ Required JSON format:
                 success=False,
                 error=f"JSON parsing error: {str(e)}",
                 prompt_metadata=IMPROVE_BULLET_META,
-                metadata={"job_title": job_title, "company": company}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"job_title": job_title, "company": company, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             
             return json.dumps({
@@ -286,7 +314,10 @@ Required JSON format:
                 success=False,
                 error=str(e),
                 prompt_metadata=IMPROVE_BULLET_META,
-                metadata={"job_title": job_title, "company": company}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"job_title": job_title, "company": company, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             
             return json.dumps({
@@ -370,12 +401,17 @@ Copy each improved bullet below and paste into your resume:
                 quality_evaluation=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={
                     "resume_name": resume_name,
                     "job_title": job_title,
                     "company": company,
                     "num_changes": len(changes),
-                    "is_formatting_only": True
+                    "is_formatting_only": True,
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -392,7 +428,11 @@ Copy each improved bullet below and paste into your resume:
                 operation="generate_change_report",
                 success=False,
                 error=str(e),
-                metadata={"resume_name": resume_name}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"resume_name": resume_name, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                
             )
             return f"Error generating report: {str(e)}"
 

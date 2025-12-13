@@ -38,7 +38,11 @@ from observatory_config import (
     create_cache_metadata,
     judge,
     DEFAULT_MODEL,
-    PromptMetadata
+    PromptMetadata,
+    ModelConfig,
+    StreamingMetrics,
+    ExperimentMetadata,
+    ErrorDetails,
 )
 
 # Configure logging
@@ -99,6 +103,10 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
     """
     logger.info(f"Processing Streamlit message: '{message[:50]}...'")
     
+    # ADD THESE THREE LINES:
+    memory.turn_number += 1
+    memory.conversation_id = obs_session.id
+
     start_time = time.time()
 
     try:
@@ -120,6 +128,18 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         plugin_used = detect_plugin_used(response)
         if plugin_used:
             logger.info(f"Plugin triggered: {plugin_used}")
+
+        # Extract tool/function calls if available
+        tool_calls = []
+        tool_count = 0
+        if hasattr(response, 'metadata') and response.metadata:
+            function_result = response.metadata.get('function_result')
+            if function_result:
+                tool_calls.append({
+                    "name": function_result.get('name'),
+                    "arguments": function_result.get('arguments')
+                })
+                tool_count = 1
 
         # Extract token usage
         prompt_tokens, completion_tokens = extract_token_usage(response)
@@ -184,6 +204,38 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             prompt_variant_id=None,  # Added: ready for A/B tests
             test_dataset_id=None,  # Added: ready for test runs
             
+            # NEW: Conversation linking
+            conversation_id=obs_session.id if hasattr(obs_session, 'id') else "streamlit_session",
+            turn_number=len(history.messages),
+            user_id=None,  # Could be added if user authentication exists
+            parent_call_id=None,
+            
+            # NEW: Model configuration (from execution_settings)
+            temperature=0.7,
+            max_tokens=800,
+            top_p=None,
+            
+            # NEW: Separate prompt components (for fast top-level queries)
+            system_prompt=SYSTEM_PROMPT,
+            user_message=message,
+            
+            # NEW: Token breakdown (top-level for fast queries without JSON parsing)
+            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+            chat_history_tokens=prompt_breakdown.chat_history_tokens if prompt_breakdown else None,
+            conversation_context_tokens=None,
+            tool_definitions_tokens=None,
+            
+            # NEW: Tool/function calling
+            tool_calls_made=tool_calls if tool_calls else None,
+            tool_call_count=tool_count,
+            tool_execution_time_ms=None,
+            
+            # NEW: Observability
+            trace_id=obs_session.id if hasattr(obs_session, 'id') else None,
+            request_id=None,
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             # Additional metadata
             metadata={
                 "plugin_used": plugin_used,
@@ -226,13 +278,41 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             operation="streamlit_chat",
             success=False,  # Failed
             error=str(e),
+            
+            # Prompt tracking
             prompt_metadata=PROMPT_META,
             prompt_breakdown=None,
+            system_prompt=SYSTEM_PROMPT,
+            user_message=message,
+            
+            # Optimization tracking
             quality_evaluation=None,
             routing_decision=None,
             cache_metadata=None,
             prompt_variant_id=None,
             test_dataset_id=None,
+            
+            # NEW: Conversation linking
+            conversation_id=obs_session.id if hasattr(obs_session, 'id') else "streamlit_session",
+            turn_number=len(history.messages),
+            user_id=None,
+            parent_call_id=None,
+            
+            # NEW: Model configuration
+            temperature=0.7,
+            max_tokens=800,
+            top_p=None,
+            
+            # NEW: Error details
+            error_type=type(e).__name__,
+            error_code=None,
+            retry_count=0,
+            
+            # NEW: Observability
+            trace_id=obs_session.id if hasattr(obs_session, 'id') else None,
+            request_id=None,
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             metadata={
                 "message_length": len(message),
                 "error_type": type(e).__name__

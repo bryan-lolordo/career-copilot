@@ -55,7 +55,11 @@ from observatory_config import (
     create_cache_metadata,
     judge,
     DEFAULT_MODEL,
-    PromptMetadata
+    PromptMetadata,
+    ModelConfig,
+    StreamingMetrics,
+    ExperimentMetadata,
+    ErrorDetails,
 )
 
 load_dotenv()
@@ -275,7 +279,7 @@ def create_kernel_with_plugins(memory: ConversationMemory = None):
         memory = ConversationMemory(session_id="cli_session")
     
     # Register all plugins with memory where relevant
-    kernel.add_plugin(JobPlugin(context=memory.context), plugin_name="JobPlugin")
+    kernel.add_plugin(JobPlugin(context=memory.context, memory=memory), plugin_name="JobPlugin")
     
     # Create matching plugin instance (reused across others)
     resume_matching_plugin = ResumeMatchingPlugin(kernel, db_service, memory)
@@ -292,7 +296,7 @@ def create_kernel_with_plugins(memory: ConversationMemory = None):
     kernel.add_plugin(ResumeTailoringPlugin(kernel, memory), plugin_name="ResumeTailoring")
     
     # Self-improving match plugin (depends on matching plugin + memory)
-    self_improving_plugin = SelfImprovingMatchPlugin(kernel, resume_matching_plugin, memory.context)
+    self_improving_plugin = SelfImprovingMatchPlugin(kernel, resume_matching_plugin, memory.context, memory=memory)
     kernel.add_plugin(self_improving_plugin, plugin_name="SelfImprovingMatch")
     
     return kernel, chat_completion, db_service, memory
@@ -471,6 +475,10 @@ async def main():
             message_count += 1
             logger.info(f"Processing message #{message_count}: '{userInput[:50]}...'")
 
+            # ADD THESE TWO LINES:
+            memory.conversation_id = session.id
+            memory.turn_number = message_count
+
             # Add user message to history
             history.add_user_message(userInput)
             
@@ -497,6 +505,18 @@ async def main():
                     prompt_tokens = getattr(usage, 'prompt_tokens', 0)
                     completion_tokens = getattr(usage, 'completion_tokens', 0)
             
+            # Extract tool/function calls if available
+            tool_calls = []
+            tool_count = 0
+            if hasattr(result, 'metadata') and result.metadata:
+                function_result = result.metadata.get('function_result')
+                if function_result:
+                    tool_calls.append({
+                        "name": function_result.get('name'),
+                        "arguments": function_result.get('arguments')
+                    })
+                    tool_count = 1
+            
             # Get response text
             response_text = str(result)
             
@@ -511,7 +531,7 @@ async def main():
                 operation="cli_chat_message",
                 prompt=userInput,
                 response=response_text,
-                llm_client=self.kernel, 
+                llm_client=kernel, 
             )
             
             # Tier 3: Routing decision (placeholder - ready for optimization)
@@ -556,6 +576,38 @@ async def main():
                 # A/B Testing support (Tier 3)
                 prompt_variant_id=None,  # Added: ready for A/B tests
                 test_dataset_id=None,  # Added: ready for test runs
+                
+                # NEW: Conversation linking
+                conversation_id=session.id if hasattr(session, 'id') else "cli_session",
+                turn_number=message_count,
+                user_id=None,  # Could be added if user authentication exists
+                parent_call_id=None,
+                
+                # NEW: Model configuration (from execution_settings)
+                temperature=0.7,
+                max_tokens=800,
+                top_p=None,
+                
+                # NEW: Separate prompt components (for fast top-level queries)
+                system_prompt=SYSTEM_PROMPT,
+                user_message=userInput,
+                
+                # NEW: Token breakdown (top-level for fast queries without JSON parsing)
+                system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+                user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                chat_history_tokens=prompt_breakdown.chat_history_tokens if prompt_breakdown else None,
+                conversation_context_tokens=None,
+                tool_definitions_tokens=None,
+                
+                # NEW: Tool/function calling
+                tool_calls_made=tool_calls if tool_calls else None,
+                tool_call_count=tool_count,
+                tool_execution_time_ms=None,
+                
+                # NEW: Observability
+                trace_id=session.id if hasattr(session, 'id') else None,
+                request_id=None,
+                environment=os.getenv("ENVIRONMENT", "development"),
                 
                 # Metadata
                 metadata={

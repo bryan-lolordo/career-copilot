@@ -5,12 +5,20 @@ Location: career-copilot/observatory_config.py
 This is the ONLY file needed in your application to use Observatory.
 All logic lives in the observatory package - this just configures it.
 
+SETUP:
+1. Replace your existing observatory_config.py with this file
+2. All Career Copilot-specific settings are already configured
+3. Import and use: from observatory_config import obs, track_call
+
 Usage:
     from observatory_config import obs, judge, cache, router, prompts, track_llm_call
     
-    # In your plugin
+    # In your code
     quality = await judge.maybe_evaluate(operation, prompt, response, client)
     track_llm_call(model, tokens, latency, operation=op, quality_evaluation=quality)
+
+UPDATED: Now supports all 139 fields including conversation linking, model config,
+         tool tracking, streaming, error details, experiments, and observability.
 """
 
 import os
@@ -44,12 +52,18 @@ from observatory import (
     create_prompt_breakdown,
     estimate_tokens,
     
-    # Models for type hints
+    # Models for type hints (existing)
     RoutingDecision,
     CacheMetadata,
     QualityEvaluation,
     PromptBreakdown,
     PromptMetadata,
+    
+    # NEW: Additional models for complete schema
+    ModelConfig,
+    StreamingMetrics,
+    ExperimentMetadata,
+    ErrorDetails,
 )
 
 # =============================================================================
@@ -64,18 +78,19 @@ from observatory import (
 
 CURRENT_PHASE = os.getenv("OBSERVATORY_PHASE", "baseline")
 
-# Validate
 if CURRENT_PHASE not in ("baseline", "optimized"):
     print(f"⚠️ Invalid OBSERVATORY_PHASE '{CURRENT_PHASE}', defaulting to 'baseline'")
     CURRENT_PHASE = "baseline"
 
 # =============================================================================
-# PROJECT CONFIGURATION
+# PROJECT CONFIGURATION - CAREER COPILOT
 # =============================================================================
 
 PROJECT_NAME = "Career Copilot"
-DEFAULT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
+
+# Model configuration - Azure OpenAI
 DEFAULT_PROVIDER = ModelProvider.AZURE
+DEFAULT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
 
 # Database path - adjust to your Observatory location
 OBSERVATORY_DB_PATH = os.path.abspath(
@@ -99,13 +114,13 @@ obs = Observatory(
 )
 
 # =============================================================================
-# CONFIGURE LLM JUDGE
+# CONFIGURE LLM JUDGE - CAREER COPILOT DOMAIN
 # =============================================================================
 
 judge = LLMJudge(
     observatory=obs,
     
-    # Operations to evaluate
+    # Operations worth evaluating (high-value career advice outputs)
     operations={
         "improve_bullet",
         "generate_change_report",
@@ -116,31 +131,32 @@ judge = LLMJudge(
         "cli_chat_message",
     },
     
-    # Skip low-value operations
+    # Operations to skip (low-value or simple)
     skip_operations={
         "generate_sql",
         "job_search",
         "save_jobs",
         "list_resumes",
         "quick_score_job",
+        "generate_refinements",  # Low-value planning operation
     },
     
     # Evaluate 50% of judge-worthy calls
     sample_rate=0.5,
     
-    # Domain-specific criteria
+    # Career advice domain criteria (must sum to 1.0)
     criteria={
-        "relevance": 0.25,
-        "accuracy": 0.25,
-        "helpfulness": 0.25,
-        "professionalism": 0.15,
-        "clarity": 0.10,
+        "relevance": 0.25,      # How relevant is the career advice?
+        "accuracy": 0.25,       # Is the information correct?
+        "helpfulness": 0.25,    # Does it help the user's job search?
+        "professionalism": 0.15, # Is it professionally appropriate?
+        "clarity": 0.10,        # Is it clear and well-structured?
     },
     
-    # Context for judge prompts
+    # Career Copilot domain context
     domain_context="career advice, resume optimization, and job matching",
     
-    # Use same model as main app
+    # Model for judging (same as main)
     judge_model=DEFAULT_MODEL,
     
     # Track judge calls in Observatory
@@ -148,28 +164,43 @@ judge = LLMJudge(
 )
 
 # =============================================================================
-# CONFIGURE CACHE MANAGER
+# CONFIGURE CACHE MANAGER - CAREER COPILOT OPERATIONS
 # =============================================================================
 
 cache = CacheManager(
     observatory=obs,
     
-    # Operations to cache with TTL settings
+    # Career Copilot operations to cache with TTL settings
     operations={
+        # Job operations
         "find_jobs": {"ttl": 3600, "normalize": True, "cluster_id": "job_searches"},
+        "get_job_details": {"ttl": 1800, "normalize": False, "cluster_id": "job_details"},
+        "get_saved_jobs": {"ttl": 600, "normalize": False, "cluster_id": "saved_jobs"},
+        
+        # Database operations
         "query_database": {"ttl": 300, "normalize": True, "cluster_id": "db_queries"},
-        "get_job_details": {"ttl": 7200, "normalize": False, "cluster_id": "job_details"},
+        "generate_sql": {"ttl": 3600, "normalize": True, "cluster_id": "sql_generation"},
+        
+        # Resume operations
         "list_resumes": {"ttl": 600, "normalize": False, "cluster_id": "resume_list"},
+        
+        # Matching operations
+        "resume_job_matching": {"ttl": 3600, "normalize": False, "cluster_id": "resume_matching"},
+        "resume_job_deep_analysis": {"ttl": 3600, "normalize": False, "cluster_id": "deep_analysis"},
+        
+        # Chat operations
+        "cli_chat": {"ttl": 1800, "normalize": False, "cluster_id": "cli_chat"},
+        "streamlit_chat": {"ttl": 1800, "normalize": False, "cluster_id": "streamlit_chat"},
     },
     
     # Defaults
-    default_ttl=3600,
-    max_entries=1000,
-    normalize_prompts=True,
+    default_ttl=3600,       # 1 hour default
+    max_entries=1000,       # Max cache size
+    normalize_prompts=True, # Normalize for better cache hits
 )
 
 # =============================================================================
-# CONFIGURE MODEL ROUTER
+# CONFIGURE MODEL ROUTER - CAREER COPILOT ROUTING RULES
 # =============================================================================
 
 router = ModelRouter(
@@ -177,7 +208,7 @@ router = ModelRouter(
     default_model=DEFAULT_MODEL,
     fallback_model="gpt-4o-mini",
     
-    # Routing rules (evaluated in order)
+    # Routing rules for Career Copilot operations (evaluated in order)
     rules=[
         # Simple retrieval operations → cheap model
         {
@@ -235,7 +266,7 @@ router = ModelRouter(
 
 prompts = PromptManager(observatory=obs)
 
-# Example: Register system prompt with variants
+# Example: Register system prompt with variants for Career Copilot
 # prompts.register(
 #     template_id="career_copilot_system",
 #     version="2.0.0",
@@ -247,15 +278,153 @@ prompts = PromptManager(observatory=obs)
 #     },
 #     experiment_id="system_prompt_test_dec_2024",
 #     weights={"control": 0.5, "concise": 0.25, "structured": 0.25},
-#     description="Testing different system prompt styles",
+#     description="Testing different system prompt styles for career advice",
 # )
 
+
 # =============================================================================
-# WRAPPER: track_llm_call (matches SDK naming)
+# HELPER FUNCTIONS: Token Breakdown & Model Parameters Extraction
+# =============================================================================
+
+def extract_token_breakdown_from_messages(
+    messages: List[Dict] = None,
+    system_prompt: str = None,
+    user_message: str = None,
+    chat_history: Any = None,
+    conversation_memory: Any = None,
+) -> Dict[str, int]:
+    """
+    Extract token breakdown from various message formats.
+    
+    Auto-populates system_prompt_tokens, user_message_tokens, chat_history_tokens,
+    and conversation_context_tokens for comprehensive token tracking.
+    
+    Args:
+        messages: Full messages array (OpenAI/SK format)
+        system_prompt: System prompt text
+        user_message: User message text
+        chat_history: Semantic Kernel ChatHistory object
+        conversation_memory: ConversationMemory object
+        
+    Returns:
+        Dict with all token breakdown fields
+    """
+    breakdown = {
+        'system_prompt_tokens': 0,
+        'user_message_tokens': 0,
+        'chat_history_tokens': 0,
+        'conversation_context_tokens': 0,
+    }
+    
+    # Method 1: Extract from messages array (OpenAI/Azure format)
+    if messages:
+        for msg in messages:
+            role = msg.get('role', '')
+            content = msg.get('content', '')
+            tokens = estimate_tokens(content) if content else 0
+            
+            if role == 'system':
+                breakdown['system_prompt_tokens'] += tokens
+            elif role == 'user':
+                breakdown['user_message_tokens'] += tokens
+            elif role in ['assistant', 'function']:
+                breakdown['chat_history_tokens'] += tokens
+    
+    # Method 2: Extract from individual strings
+    else:
+        if system_prompt:
+            breakdown['system_prompt_tokens'] = estimate_tokens(system_prompt)
+        
+        if user_message:
+            breakdown['user_message_tokens'] = estimate_tokens(user_message)
+        
+        # Method 3: Extract from Semantic Kernel ChatHistory
+        if chat_history:
+            try:
+                if hasattr(chat_history, 'messages'):
+                    history_tokens = 0
+                    for msg in chat_history.messages:
+                        # Skip system messages (already counted)
+                        if hasattr(msg, 'role') and msg.role != 'system':
+                            content = str(msg.content) if hasattr(msg, 'content') else ''
+                            history_tokens += estimate_tokens(content)
+                    breakdown['chat_history_tokens'] = history_tokens
+            except Exception:
+                pass  # Silent fail
+    
+    # Method 4: Extract from ConversationMemory context
+    if conversation_memory:
+        try:
+            if hasattr(conversation_memory, 'get_context_for_prompt'):
+                context_text = conversation_memory.get_context_for_prompt()
+                if context_text and context_text != "No prior context.":
+                    breakdown['conversation_context_tokens'] = estimate_tokens(context_text)
+        except Exception:
+            pass  # Silent fail
+    
+    return breakdown
+
+
+def extract_model_parameters(
+    client: Any = None,
+    execution_settings: Any = None,
+    temperature: float = None,
+    max_tokens: int = None,
+    top_p: float = None,
+) -> Dict[str, Any]:
+    """
+    Extract model parameters from various sources.
+    
+    Tries to extract from execution_settings (Semantic Kernel) or client object.
+    
+    Args:
+        client: OpenAI/Azure client object
+        execution_settings: Semantic Kernel execution settings
+        temperature: Explicit temperature value
+        max_tokens: Explicit max tokens value
+        top_p: Explicit top_p value
+        
+    Returns:
+        Dict with temperature, max_tokens, top_p
+    """
+    params = {
+        'temperature': temperature,
+        'max_tokens': max_tokens,
+        'top_p': top_p,
+    }
+    
+    # Try to extract from execution_settings (Semantic Kernel)
+    if execution_settings:
+        try:
+            if hasattr(execution_settings, 'temperature'):
+                params['temperature'] = params['temperature'] or execution_settings.temperature
+            if hasattr(execution_settings, 'max_tokens'):
+                params['max_tokens'] = params['max_tokens'] or execution_settings.max_tokens
+            if hasattr(execution_settings, 'top_p'):
+                params['top_p'] = params['top_p'] or execution_settings.top_p
+        except Exception:
+            pass  # Silent fail
+    
+    # Try to extract from client (OpenAI/Azure)
+    if client and not all(params.values()):
+        try:
+            if hasattr(client, 'temperature'):
+                params['temperature'] = params['temperature'] or client.temperature
+            if hasattr(client, 'max_tokens'):
+                params['max_tokens'] = params['max_tokens'] or client.max_tokens
+            if hasattr(client, 'top_p'):
+                params['top_p'] = params['top_p'] or client.top_p
+        except Exception:
+            pass  # Silent fail
+    
+    return params
+
+# =============================================================================
+# WRAPPER: track_llm_call (COMPLETE 139 FIELD SUPPORT)
 # =============================================================================
 
 def track_llm_call(
-    # Core metrics
+    # TIER 1 - Core metrics (always include)
     model_name: str = None,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
@@ -270,39 +439,84 @@ def track_llm_call(
     success: bool = True,
     error: str = None,
     
-    # Prompt content
+    # TIER 2 - Prompt content
     prompt: str = None,
     response_text: str = None,
     prompt_normalized: str = None,
-    
-    # Separate prompt components
     system_prompt: str = None,
     user_message: str = None,
     messages: List[Dict[str, str]] = None,
     
-    # Optimization tracking
+    # TIER 2 - Optimization tracking
     routing_decision: RoutingDecision = None,
     cache_metadata: CacheMetadata = None,
     quality_evaluation: QualityEvaluation = None,
-    
-    # Prompt analysis
     prompt_breakdown: PromptBreakdown = None,
     prompt_metadata: PromptMetadata = None,
     
-    # A/B Testing
+    # TIER 3 - A/B Testing
     prompt_variant_id: str = None,
     test_dataset_id: str = None,
     
-    # Custom metadata
+    # NEW: CONVERSATION LINKING
+    conversation_id: str = None,
+    turn_number: int = None,
+    parent_call_id: str = None,
+    user_id: str = None,
+    
+    # NEW: MODEL CONFIGURATION
+    temperature: float = None,
+    max_tokens: int = None,
+    top_p: float = None,
+    model_config: ModelConfig = None,
+    
+    # NEW: TOKEN BREAKDOWN (Top-level for fast queries)
+    system_prompt_tokens: int = None,
+    user_message_tokens: int = None,
+    chat_history_tokens: int = None,
+    conversation_context_tokens: int = None,
+    tool_definitions_tokens: int = None,
+    
+    # NEW: TOOL/FUNCTION CALLING
+    tool_calls_made: List[Dict[str, Any]] = None,
+    tool_call_count: int = None,
+    tool_execution_time_ms: float = None,
+    
+    # NEW: STREAMING
+    time_to_first_token_ms: float = None,
+    streaming_metrics: StreamingMetrics = None,
+    
+    # NEW: ERROR DETAILS
+    error_type: str = None,
+    error_code: str = None,
+    retry_count: int = None,
+    error_details: ErrorDetails = None,
+    
+    # NEW: CACHED TOKENS
+    cached_prompt_tokens: int = None,
+    cached_token_savings: float = None,
+    
+    # NEW: OBSERVABILITY
+    trace_id: str = None,
+    request_id: str = None,
+    environment: str = None,
+    
+    # NEW: EXPERIMENT TRACKING
+    experiment_id: str = None,
+    control_group: bool = None,
+    experiment_metadata: ExperimentMetadata = None,
+    
+    # CUSTOM METADATA
     metadata: dict = None,
 ):
     """
     Track an LLM call with auto-filled defaults for Career Copilot.
     
-    Uses default model and provider from config.
-    Passes all parameters through to SDK's track_llm_call.
+    Supports all 139 fields across 3 tiers plus new conversation linking,
+    model config, tool tracking, streaming, error details, experiments, and observability.
     
     Args:
+        # TIER 1 - Core (always include)
         model_name: Model used (defaults to DEFAULT_MODEL)
         prompt_tokens: Input token count
         completion_tokens: Output token count
@@ -312,12 +526,16 @@ def track_llm_call(
         operation: Operation name
         success: Whether call succeeded
         error: Error message if failed
+        
+        # PROMPT CONTENT (Tier 2)
         prompt: Combined prompt text
         response_text: Response from model
         prompt_normalized: Normalized prompt for cache key generation
         system_prompt: System prompt (tracked separately)
         user_message: User message (tracked separately)
         messages: Full conversation as [{role, content}, ...]
+        
+        # OPTIMIZATION TRACKING (Tier 2-3)
         routing_decision: Routing metadata
         cache_metadata: Cache metadata
         quality_evaluation: Quality evaluation
@@ -325,11 +543,93 @@ def track_llm_call(
         prompt_metadata: Prompt template metadata
         prompt_variant_id: A/B test variant ID
         test_dataset_id: Test dataset ID
+        
+        # NEW: CONVERSATION LINKING
+        conversation_id: Conversation identifier (links multi-turn chats)
+        turn_number: Turn number in conversation (1, 2, 3...)
+        parent_call_id: Parent call ID (for retries/branches)
+        user_id: User identifier
+        
+        # NEW: MODEL CONFIGURATION
+        temperature: Model temperature setting
+        max_tokens: Max tokens limit
+        top_p: Top-p sampling parameter
+        llm_config: Full ModelConfig object with all settings
+        
+        # NEW: TOKEN BREAKDOWN (Top-level for fast queries)
+        system_prompt_tokens: System prompt token count
+        user_message_tokens: User message token count
+        chat_history_tokens: Chat history token count
+        conversation_context_tokens: Conversation memory/state tokens
+        tool_definitions_tokens: Function calling schema tokens
+        
+        # NEW: TOOL/FUNCTION CALLING
+        tool_calls_made: List of tool calls with details
+        tool_call_count: Number of tools called
+        tool_execution_time_ms: Total tool execution time
+        
+        # NEW: STREAMING
+        time_to_first_token_ms: Time to first token (TTFT)
+        streaming_metrics: Full StreamingMetrics object
+        
+        # NEW: ERROR DETAILS
+        error_type: Error classification (RATE_LIMIT, TIMEOUT, etc.)
+        error_code: Provider error code (429, 500, etc.)
+        retry_count: Number of retries attempted
+        error_details: Full ErrorDetails object
+        
+        # NEW: CACHED TOKENS
+        cached_prompt_tokens: Tokens served from cache
+        cached_token_savings: Cost saved via caching
+        
+        # NEW: OBSERVABILITY
+        trace_id: OpenTelemetry trace ID
+        request_id: Provider request ID
+        environment: Deployment environment (dev/staging/prod)
+        
+        # NEW: EXPERIMENT TRACKING
+        experiment_id: A/B test experiment ID
+        control_group: Is this control group?
+        experiment_metadata: Full ExperimentMetadata object
+        
+        # CUSTOM METADATA
         metadata: Additional metadata dict
     
     Returns:
         LLMCall object
     """
+    # ⭐ AUTO-EXTRACT: Token breakdown and model parameters
+    # This ensures ALL calls get Tier 2 fields populated automatically
+    
+    # Extract token breakdown if not explicitly provided
+    if not system_prompt_tokens and not user_message_tokens and not chat_history_tokens:
+        token_breakdown = extract_token_breakdown_from_messages(
+            messages=messages,
+            system_prompt=system_prompt,
+            user_message=user_message,
+            chat_history=None,  # We can add support for chat_history param if needed
+            conversation_memory=metadata.get('conversation_memory') if metadata else None
+        )
+        
+        # Use extracted values
+        system_prompt_tokens = system_prompt_tokens or token_breakdown['system_prompt_tokens']
+        user_message_tokens = user_message_tokens or token_breakdown['user_message_tokens']
+        chat_history_tokens = chat_history_tokens or token_breakdown['chat_history_tokens']
+        conversation_context_tokens = conversation_context_tokens or token_breakdown['conversation_context_tokens']
+    
+    # Extract model parameters if not explicitly provided
+    if temperature is None or max_tokens is None or top_p is None:
+        model_params = extract_model_parameters(
+            execution_settings=metadata.get('execution_settings') if metadata else None,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+        )
+        
+        temperature = temperature if temperature is not None else model_params['temperature']
+        max_tokens = max_tokens if max_tokens is not None else model_params['max_tokens']
+        top_p = top_p if top_p is not None else model_params['top_p']
+    
     # Convert string agent_role to AgentRole enum if provided
     role_enum = None
     if agent_role:
@@ -366,8 +666,58 @@ def track_llm_call(
         prompt_metadata=prompt_metadata,
         prompt_variant_id=prompt_variant_id,
         test_dataset_id=test_dataset_id,
+        
+        # NEW: Conversation linking
+        conversation_id=conversation_id,
+        turn_number=turn_number,
+        parent_call_id=parent_call_id,
+        user_id=user_id,
+        
+        # NEW: Model configuration
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=top_p,
+        model_config=model_config,
+        
+        # NEW: Token breakdown
+        system_prompt_tokens=system_prompt_tokens,
+        user_message_tokens=user_message_tokens,
+        chat_history_tokens=chat_history_tokens,
+        conversation_context_tokens=conversation_context_tokens,
+        tool_definitions_tokens=tool_definitions_tokens,
+        
+        # NEW: Tool tracking
+        tool_calls_made=tool_calls_made,
+        tool_call_count=tool_call_count,
+        tool_execution_time_ms=tool_execution_time_ms,
+        
+        # NEW: Streaming
+        time_to_first_token_ms=time_to_first_token_ms,
+        streaming_metrics=streaming_metrics,
+        
+        # NEW: Error details
+        error_type=error_type,
+        error_code=error_code,
+        retry_count=retry_count,
+        error_details=error_details,
+        
+        # NEW: Cached tokens
+        cached_prompt_tokens=cached_prompt_tokens,
+        cached_token_savings=cached_token_savings,
+        
+        # NEW: Observability
+        trace_id=trace_id,
+        request_id=request_id,
+        environment=environment,
+        
+        # NEW: Experiment tracking
+        experiment_id=experiment_id,
+        control_group=control_group,
+        experiment_metadata=experiment_metadata,
+        
         metadata=metadata,
     )
+
 
 
 # =============================================================================
@@ -415,11 +765,17 @@ __all__ = [
     'create_prompt_breakdown',
     'estimate_tokens',
     
-    # Types for type hints
+    # Types for type hints (existing)
     'RoutingDecision',
     'CacheMetadata',
     'QualityEvaluation',
     'PromptBreakdown',
     'PromptMetadata',
     'AgentRole',
+    
+    # NEW: Additional types
+    'ModelConfig',
+    'StreamingMetrics',
+    'ExperimentMetadata',
+    'ErrorDetails',
 ]

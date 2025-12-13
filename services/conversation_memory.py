@@ -118,6 +118,10 @@ class ConversationMemory:
         self.context = ConversationContext()
         self.history: List[ConversationTurn] = []
         self.pending_actions: List[Dict] = []  # Actions to be executed by UI
+
+        # ADD THESE TWO LINES:
+        self.conversation_id = None  # Set by chatbot/kernel before each turn
+        self.turn_number = 0         # Incremented by chatbot/kernel for each user message
     
     def update_context(self, **kwargs):
         """Update any aspect of the conversation context"""

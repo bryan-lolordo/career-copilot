@@ -22,7 +22,11 @@ from observatory_config import (
     create_cache_metadata,
     judge,
     DEFAULT_MODEL,
-    PromptMetadata
+    PromptMetadata,
+    ModelConfig,
+    StreamingMetrics,
+    ExperimentMetadata,
+    ErrorDetails,
 )
 
 # Configure logging
@@ -63,6 +67,10 @@ class ResumeMatchingPlugin:
         self.kernel = kernel
         self.db = database_service
         self.memory = memory
+
+        # Create execution settings once per plugin instance
+        from agents.semantic_kernel_setup import create_execution_settings
+        self.exec_settings = create_execution_settings()
     
     @kernel_function(
         name="list_resumes",
@@ -86,7 +94,10 @@ class ResumeMatchingPlugin:
                 success=True,
                 prompt="List all resumes",
                 response_text="No resumes found",
-                metadata={"result_count": 0, "is_db_read": True}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"result_count": 0, "is_db_read": True, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return "No resumes found in the database. Please upload a resume first."
         
@@ -112,7 +123,10 @@ class ResumeMatchingPlugin:
             success=True,
             prompt="List all resumes",
             response_text=response[:500],
-            metadata={"result_count": len(resumes), "is_db_read": True}
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
+            metadata={"result_count": len(resumes), "is_db_read": True, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
         )
         
         return response
@@ -158,7 +172,14 @@ class ResumeMatchingPlugin:
                     operation="select_resume_for_matching",
                     success=False,
                     error=f"Invalid selection: {selection}",
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                     prompt=f"Select resume: {selection}",
+                    # NEW: Observability
+                    environment=os.getenv("ENVIRONMENT", "development"),
+                    
                     metadata={"selection": selection}
                 )
                 return "❌ I didn't understand that selection. Please say 'first', 'second', or a number like '1' or '2'."
@@ -183,7 +204,14 @@ class ResumeMatchingPlugin:
                 operation="select_resume_for_matching",
                 success=False,
                 error="Invalid resume index",
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 prompt=f"Select resume: {selection}",
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={"selection": selection, "resume_index": resume_index}
             )
             return f"❌ Invalid selection. Please choose between 1 and {len(resumes) if resumes else 0}."
@@ -236,13 +264,18 @@ class ResumeMatchingPlugin:
             success=True,
             prompt=f"Select resume: {selection}",
             response_text=response[:500],
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             metadata={
                 "selection": selection,
                 "resume_id": selected_resume['id'],
                 "resume_name": selected_resume['name'],
                 "total_jobs": total_jobs,
                 "unmatched_jobs": unmatched_jobs,
-                "is_db_read": True
+                "is_db_read": True,
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
         
@@ -274,8 +307,15 @@ class ResumeMatchingPlugin:
                 operation="select_job_filter_for_matching",
                 success=False,
                 error="No resume selected",
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 prompt=f"Filter: {filter_choice}",
-                metadata={"filter_choice": filter_choice}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"filter_choice": filter_choice, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return "❌ Please select a resume first. Say 'match my resume' to start."
         
@@ -325,7 +365,10 @@ class ResumeMatchingPlugin:
                 success=True,
                 prompt=f"Filter: {filter_choice}",
                 response_text="No jobs found",
-                metadata={"filter_choice": filter_choice, "job_filter": job_filter, "result_count": 0}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"filter_choice": filter_choice, "job_filter": job_filter, "result_count": 0, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return f"❌ No jobs found for filter: {job_filter}. Try a different filter or add more jobs."
         
@@ -345,11 +388,18 @@ class ResumeMatchingPlugin:
             success=True,
             prompt=f"Filter: {filter_choice}",
             response_text=f"Starting match for {len(job_ids)} jobs",
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             metadata={
                 "filter_choice": filter_choice,
                 "job_filter": job_filter,
                 "result_count": len(job_ids),
                 "resume_id": resume_id
+                "resume_name": resume['name'],
+                "is_db_read": True,
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
         
@@ -374,10 +424,15 @@ class ResumeMatchingPlugin:
         # Start tracking the full matching session
         session = start_session(
             "resume_matching_workflow",
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             metadata={
                 "resume_id": resume_id,
                 "num_jobs": len(job_ids),
-                "operation": "filtered_matching"
+                "operation": "filtered_matching",
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
         logger.info(f"Starting resume matching: Resume #{resume_id} vs {len(job_ids)} jobs")
@@ -388,6 +443,10 @@ class ResumeMatchingPlugin:
             resume = self.db.get_resume_by_id(resume_id)
             if not resume:
                 end_session(session, success=False, error="Resume not found")
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 return f"❌ Error: Resume with ID {resume_id} not found."
             
             resume_text = resume.get('content', '')
@@ -402,6 +461,10 @@ class ResumeMatchingPlugin:
             
             if not jobs:
                 end_session(session, success=False, error="No jobs found")
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 return "❌ No jobs found for matching."
             
             logger.info(f"Phase 1: Quick scoring {len(jobs)} jobs...")
@@ -514,8 +577,15 @@ class ResumeMatchingPlugin:
                 operation="explain_recent_match",
                 success=False,
                 error="No memory available",
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 prompt=f"Explain match #{match_number}",
-                metadata={"match_number": match_number}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"match_number": match_number, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return "❌ No memory available to retrieve match results."
         
@@ -531,8 +601,15 @@ class ResumeMatchingPlugin:
                 operation="explain_recent_match",
                 success=False,
                 error="No recent matches found",
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 prompt=f"Explain match #{match_number}",
-                metadata={"match_number": match_number}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"match_number": match_number, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return "❌ No recent match results found. Please run 'match my resume' first."
         
@@ -546,8 +623,15 @@ class ResumeMatchingPlugin:
                 operation="explain_recent_match",
                 success=False,
                 error=f"Invalid match number: {match_number}",
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 prompt=f"Explain match #{match_number}",
-                metadata={"match_number": match_number, "available_matches": len(recent_matches)}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"match_number": match_number, "available_matches": len(recent_matches), "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return f"❌ Invalid match number. Please choose between 1 and {len(recent_matches)}."
         
@@ -595,11 +679,16 @@ class ResumeMatchingPlugin:
             success=True,
             prompt=f"Explain match #{match_number}",
             response_text=response[:500],
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             metadata={
                 "match_number": match_number,
                 "job_id": match.get('job_id'),
                 "job_title": match.get('title'),
-                "score": match.get('score')
+                "score": match.get('score'),
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
         
@@ -635,8 +724,15 @@ class ResumeMatchingPlugin:
                     operation="show_saved_matches",
                     success=False,
                     error="No resumes found",
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                     prompt=f"Show matches for resume_id={resume_id}",
-                    metadata={"resume_id": resume_id}
+                    # NEW: Observability
+                    environment=os.getenv("ENVIRONMENT", "development"),
+                    
+                    metadata={"resume_id": resume_id, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
                 )
                 return "❌ No resumes found. Please upload a resume first."
             resume_id = str(resume['id'])
@@ -653,8 +749,15 @@ class ResumeMatchingPlugin:
                     operation="show_saved_matches",
                     success=False,
                     error=f"Resume not found: {resume_id}",
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                     prompt=f"Show matches for resume_id={resume_id}",
-                    metadata={"resume_id": resume_id}
+                    # NEW: Observability
+                    environment=os.getenv("ENVIRONMENT", "development"),
+                    
+                    metadata={"resume_id": resume_id, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
                 )
                 return f"❌ Resume with ID {resume_id} not found."
             resume_name = resume['name']
@@ -692,7 +795,10 @@ class ResumeMatchingPlugin:
                     success=True,
                     prompt=f"Show matches for resume_id={resume_id}",
                     response_text="No saved matches found",
-                    metadata={"resume_id": resume_id, "resume_name": resume_name, "result_count": 0}
+                    # NEW: Observability
+                    environment=os.getenv("ENVIRONMENT", "development"),
+                    
+                    metadata={"resume_id": resume_id, "resume_name": resume_name, "result_count": 0, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
                 )
                 return f"❌ No saved matches found for '{resume_name}'.\n\nRun matching first: 'match my resume'"
             
@@ -742,11 +848,16 @@ class ResumeMatchingPlugin:
                 success=True,
                 prompt=f"Show matches for resume_id={resume_id}",
                 response_text=response[:500],
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={
                     "resume_id": resume_id,
                     "resume_name": resume_name,
                     "result_count": len(matches),
-                    "is_db_read": True
+                    "is_db_read": True,
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -762,8 +873,15 @@ class ResumeMatchingPlugin:
                 operation="show_saved_matches",
                 success=False,
                 error=str(e),
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 prompt=f"Show matches for resume_id={resume_id}",
-                metadata={"resume_id": resume_id}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"resume_id": resume_id, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return f"❌ Error retrieving matches: {str(e)}"
 
@@ -938,10 +1056,27 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 prompt_variant_id=None,
                 test_dataset_id=None,
                 
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                
+                # NEW: Model configuration
+                temperature=0.3,  # Factual scoring
+                max_tokens=None,
+                
+                # NEW: Token breakdown (top-level)
+                system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+                user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 # Metadata
                 metadata={
                     "job_id": job.get('id'),
-                    "job_title": job.get('title', 'Unknown')
+                    "job_title": job.get('title', 'Unknown'),
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -987,8 +1122,15 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 operation="quick_score_job",
                 success=False,
                 error=str(e),
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 prompt_metadata=QUICK_SCORE_META,
-                metadata={"job_id": job.get('id'), "job_title": job.get('title', 'Unknown')}
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"job_id": job.get('id'), "job_title": job.get('title', 'Unknown'), "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             
             return {
@@ -1171,12 +1313,29 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 prompt_variant_id=None,
                 test_dataset_id=None,
                 
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                
+                # NEW: Model configuration
+                temperature=0.5,  # Balanced analysis
+                max_tokens=None,
+                
+                # NEW: Token breakdown (top-level)
+                system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+                user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 # Metadata
                 metadata={
                     "job_id": job.get('id'),
                     "job_title": job.get('title', 'Unknown'),
                     "original_score": original_score,
                     "judged": quality_eval is not None
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -1231,7 +1390,14 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 operation="deep_analyze_job",
                 success=False,
                 error=str(e),
+                
+                # NEW: Error details
+                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                retry_count=0,
                 prompt_metadata=DEEP_ANALYSIS_META,
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={"job_id": job.get('id'), "job_title": job.get('title', 'Unknown')}
             )
             

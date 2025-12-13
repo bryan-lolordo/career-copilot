@@ -24,7 +24,11 @@ from observatory_config import (
     create_cache_metadata,
     judge,
     DEFAULT_MODEL,
-    PromptMetadata
+    PromptMetadata,
+    ModelConfig,
+    StreamingMetrics,
+    ExperimentMetadata,
+    ErrorDetails,
 )
 
 # =============================================================================
@@ -57,13 +61,19 @@ class JobPlugin:
     Plugin to search for jobs using external APIs and save them to the database.
     """
     
-    def __init__(self, context=None):
+    def __init__(self, context=None, memory=None):
         """
         Initialize the JobPlugin with optional shared conversation context.
         Args:
             context: Shared ConversationContext instance for memory.
+            memory: ConversationMemory instance for tracking.
         """
         self.context = context
+        self.memory = memory
+
+        # Create execution settings once per plugin instance
+        from agents.semantic_kernel_setup import create_execution_settings
+        self.exec_settings = create_execution_settings()
 
     @kernel_function(
         name="find_jobs",
@@ -83,6 +93,17 @@ class JobPlugin:
         """
         Search for jobs and store in context for exploration and later saving.
         """
+
+            # DEBUG - ADD THESE LINES AT THE VERY TOP
+        print(f"\n🔍 DEBUG JobPlugin.find_jobs:")
+        print(f"   self.memory = {self.memory}")
+        print(f"   type(self.memory) = {type(self.memory)}")
+        if self.memory:
+            print(f"   hasattr conversation_id? {hasattr(self.memory, 'conversation_id')}")
+            print(f"   hasattr turn_number? {hasattr(self.memory, 'turn_number')}")
+            print(f"   conversation_id = {getattr(self.memory, 'conversation_id', 'NO ATTRIBUTE')}")
+            print(f"   turn_number = {getattr(self.memory, 'turn_number', 'NO ATTRIBUTE')}")
+        print()
 
         logger.info(f"Searching for jobs: query='{query}', location='{location}', num_results={num_results}")
         
@@ -136,13 +157,22 @@ class JobPlugin:
                     prompt_variant_id=None,  # Added: ready for A/B tests
                     test_dataset_id=None,  # Added: ready for test runs
                     
+                    # NEW: Conversation linking
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+                    
+                    # NEW: Observability
+                    environment=os.getenv("ENVIRONMENT", "development"),
+                    
                     # Metadata
                     metadata={
                         "query": query,
                         "location": location,
                         "num_results_requested": num_results,
                         "jobs_found": 0,
-                        "is_api_call": True
+                        "is_api_call": True,
+                        "conversation_memory": self.memory,        
+                        "execution_settings": self.exec_settings
                     }
                 )
                 
@@ -204,6 +234,13 @@ class JobPlugin:
                 prompt_variant_id=None,  # Added
                 test_dataset_id=None,  # Added
                 
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                    
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 # Metadata
                 metadata={
                     "query": query,
@@ -211,6 +248,8 @@ class JobPlugin:
                     "num_results_requested": num_results,
                     "jobs_found": len(jobs),
                     "is_api_call": True
+                    "conversation_memory": self.memory,        
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -239,11 +278,25 @@ class JobPlugin:
                 cache_metadata=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+                
+                # NEW: Error details
+                error_type=type(e).__name__,
+                retry_count=0,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={
                     "query": query,
                     "location": location,
                     "is_api_call": True,
-                    "error_type": type(e).__name__
+                    "error_type": type(e).__name__,
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -314,13 +367,22 @@ class JobPlugin:
             # A/B Testing support (Tier 3)
             prompt_variant_id=None,
             test_dataset_id=None,
+
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,    
+            
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
             
             # Metadata
             metadata={
                 "job_number": job_number,
                 "job_title": job.get('title'),
                 "job_company": job.get('company'),
-                "is_retrieval": True
+                "is_retrieval": True,
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
         
@@ -401,6 +463,13 @@ class JobPlugin:
             # A/B Testing support (Tier 3)
             prompt_variant_id=None,
             test_dataset_id=None,
+
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+            
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
             
             # Metadata
             metadata={
@@ -409,6 +478,8 @@ class JobPlugin:
                 "query": query,
                 "location": location,
                 "is_db_write": True
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
         
@@ -470,10 +541,20 @@ class JobPlugin:
                     cache_metadata=None,
                     prompt_variant_id=None,
                     test_dataset_id=None,
+                    
+                    # NEW: Conversation linking
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+
+                    # NEW: Observability
+                    environment=os.getenv("ENVIRONMENT", "development"),
+                    
                     metadata={
                         "limit": limit,
                         "jobs_returned": 0,
-                        "is_db_read": True
+                        "is_db_read": True,
+                        "conversation_memory": self.memory,
+                        "execution_settings": self.exec_settings
                     }
                 )
                 
@@ -513,10 +594,20 @@ class JobPlugin:
                 cache_metadata=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+                
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={
                     "limit": limit,
                     "jobs_returned": len(jobs),
                     "is_db_read": True
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -543,10 +634,24 @@ class JobPlugin:
                 cache_metadata=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+                
+                # NEW: Error details
+                error_type=type(e).__name__,
+                retry_count=0,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={
                     "limit": limit,
                     "is_db_read": True,
                     "error_type": type(e).__name__
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             

@@ -26,7 +26,11 @@ from observatory_config import (
     create_cache_metadata,
     judge,
     DEFAULT_MODEL,
-    PromptMetadata
+    PromptMetadata,
+    ModelConfig,
+    StreamingMetrics,
+    ExperimentMetadata,
+    ErrorDetails,
 )
 
 # Configure logging
@@ -64,6 +68,10 @@ class DatabaseQueryPlugin:
         self.db_path = DB_PATH
         self.schema = self._get_database_schema()
         self.memory = memory
+
+        # Create execution settings once per plugin instance
+        from agents.semantic_kernel_setup import create_execution_settings
+        self.exec_settings = create_execution_settings()
 
     def _get_database_schema(self) -> str:
         """Retrieves the database schema."""
@@ -160,6 +168,10 @@ SQL Query:"""
         try:
             print(f"\n🤖 Generating SQL for question: '{question}'")
             
+            # Get execution settings for tracking
+            from agents.semantic_kernel_setup import create_execution_settings
+            exec_settings = create_execution_settings()
+
             # Track LLM call for SQL generation
             llm_start_time = time.time()
             
@@ -232,12 +244,29 @@ SQL Query:"""
                 prompt_variant_id=None,  # Added: ready for A/B tests
                 test_dataset_id=None,  # Added: ready for test runs
                 
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                
+                # NEW: Model configuration
+                temperature=0.0,  # SQL generation should be deterministic
+                max_tokens=None,
+                
+                # NEW: Token breakdown (top-level)
+                system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+                user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 # Metadata
                 metadata={
                     "question": question[:200],
                     "generated_sql": generated_sql[:300],
                     "schema_length": len(self.schema),
-                    "judged": quality_eval is not None
+                    "judged": quality_eval is not None,
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings,
                 }
             )
             
@@ -302,7 +331,15 @@ SQL Query:"""
                 success=False,
                 error=f"Database error: {str(e)}",
                 prompt_metadata=SQL_PROMPT_META,
-                metadata={"question": question[:200], "error_type": "sqlite_error"}
+                
+                # NEW: Error details
+                error_type="sqlite_error",
+                retry_count=0,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"question": question[:200], "error_type": "sqlite_error", "conversation_memory": self.memory, "execution_settings": self.exec_settings}                
             )
             return f"❌ Database error: {str(e)}\nGenerated SQL was: {generated_sql if 'generated_sql' in locals() else 'N/A'}"
             
@@ -318,7 +355,15 @@ SQL Query:"""
                 success=False,
                 error=str(e),
                 prompt_metadata=SQL_PROMPT_META,
-                metadata={"question": question[:200], "error_type": "general_error"}
+                
+                # NEW: Error details
+                error_type=type(e).__name__,
+                retry_count=0,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"question": question[:200], "error_type": "general_error", "conversation_memory": self.memory, "execution_settings": self.exec_settings}  
             )
             return f"❌ Error processing query: {str(e)}"
     
@@ -416,12 +461,18 @@ SQL Query:"""
                 quality_evaluation=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={
                     "resume_id": resume_id,
                     "resume_name": resume_name if 'resume_name' in locals() else None,
                     "limit": limit,
                     "matches_returned": len(matches) if 'matches' in locals() else 0,
-                    "is_db_read": True
+                    "is_db_read": True,
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -437,7 +488,15 @@ SQL Query:"""
                 operation="get_top_matches",
                 success=False,
                 error=str(e),
-                metadata={"resume_id": resume_id, "is_db_read": True}
+                
+                # NEW: Error details
+                error_type=type(e).__name__,
+                retry_count=0,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"resume_id": resume_id, "is_db_read": True, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return f"❌ Error retrieving matches: {str(e)}"
     
@@ -500,10 +559,16 @@ SQL Query:"""
                 quality_evaluation=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={
                     "limit": limit,
                     "jobs_returned": len(jobs) if 'jobs' in locals() else 0,
-                    "is_db_read": True
+                    "is_db_read": True,
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -519,7 +584,16 @@ SQL Query:"""
                 operation="get_recent_saved_jobs",
                 success=False,
                 error=str(e),
-                metadata={"limit": limit, "is_db_read": True}
+                
+                # NEW: Error details
+                error_type=type(e).__name__,
+                retry_count=0,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"limit": limit, "is_db_read": True, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                
             )
             return f"❌ Error retrieving recent jobs: {str(e)}"
 
@@ -585,11 +659,17 @@ SQL Query:"""
                 quality_evaluation=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
                 metadata={
                     "resume_count": resume_count,
                     "job_count": job_count,
                     "match_count": match_count,
                     "is_db_read": True
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -605,6 +685,14 @@ SQL Query:"""
                 operation="get_database_stats",
                 success=False,
                 error=str(e),
-                metadata={"is_db_read": True}
+                
+                # NEW: Error details
+                error_type=type(e).__name__,
+                retry_count=0,
+                
+                # NEW: Observability
+                environment=os.getenv("ENVIRONMENT", "development"),
+                
+                metadata={"is_db_read": True, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
             )
             return f"❌ Error retrieving stats: {str(e)}"

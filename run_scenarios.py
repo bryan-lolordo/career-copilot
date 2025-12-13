@@ -181,6 +181,10 @@ class ScenarioRunner:
             }
         )
         
+        # ⭐ FIX: Initialize memory tracking fields for Observatory
+        memory.conversation_id = session.id  # Link to Observatory session
+        memory.turn_number = 0  # Will be incremented before each turn
+        
         result = {
             "scenario_id": scenario_id,
             "success": True,
@@ -199,6 +203,9 @@ class ScenarioRunner:
                 expected_tools = turn.get("expected_tools", [])
                 
                 print_turn(turn_num, user_input, expected_tools)
+                
+                # ⭐ FIX: Set turn number BEFORE executing the turn
+                memory.turn_number = turn_num
                 
                 # Tag test metadata in memory context
                 memory.context.test_metadata = {

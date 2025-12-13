@@ -24,7 +24,11 @@ from observatory_config import (
     create_cache_metadata,
     judge,
     DEFAULT_MODEL,
-    PromptMetadata
+    PromptMetadata,
+    ModelConfig,
+    StreamingMetrics,
+    ExperimentMetadata,
+    ErrorDetails,
 )
 
 # Configure logging
@@ -74,7 +78,7 @@ REFINE_ANALYSIS_META = create_prompt_metadata(
 
 class SelfImprovingMatchPlugin:
     
-    def __init__(self, kernel, matching_plugin, context=None):
+    def __init__(self, kernel, matching_plugin, context=None, memory=None):
         """
         Args:
             kernel: Semantic Kernel instance
@@ -84,6 +88,11 @@ class SelfImprovingMatchPlugin:
         self.kernel = kernel
         self.matching_plugin = matching_plugin
         self.context = context
+        self.memory = memory
+
+        # Create execution settings once per plugin instance
+        from agents.semantic_kernel_setup import create_execution_settings
+        self.exec_settings = create_execution_settings()
 
     @kernel_function(
         name="self_improve_single_match",
@@ -418,6 +427,21 @@ Format:
             prompt_variant_id=None,  # Added: ready for A/B tests
             test_dataset_id=None,  # Added: ready for test runs
             
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+
+            # NEW: Model configuration
+            temperature=0.7,  # Creative writing for resume improvement
+            max_tokens=None,  # Keep None to see inefficiencies
+            
+            # NEW: Token breakdown (top-level)
+            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             # Metadata
             metadata={
                 "job_id": job.get('id'),
@@ -425,6 +449,8 @@ Format:
                 "iteration_mode": "initial",
                 "has_guidance": bool(guidance),
                 "judged": quality_eval is not None
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
 
@@ -618,6 +644,21 @@ Company: {job.get('company', 'N/A')}
             prompt_variant_id=None,  # Added: ready for A/B tests
             test_dataset_id=None,  # Added: ready for test runs
             
+            # NEW: Conversation linking
+            conversation_id=self.context.memory.conversation_id if hasattr(self.context, 'memory') and self.context.memory else None,
+            turn_number=self.context.memory.turn_number if hasattr(self.context, 'memory') and self.context.memory else None,
+            
+            # NEW: Model configuration
+            temperature=0.5,  # Balanced analysis
+            max_tokens=None,
+            
+            # NEW: Token breakdown (top-level)
+            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+            
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             # Metadata
             metadata={
                 "job_id": job.get('id'),
@@ -625,6 +666,8 @@ Company: {job.get('company', 'N/A')}
                 "previous_score": existing_score,
                 "iteration_mode": "refinement",
                 "judged": quality_eval is not None
+                "conversation_memory": self.context.memory if hasattr(self.context, 'memory') else None,
+                "execution_settings": self.exec_settings
             }
         )
         
@@ -783,6 +826,17 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             prompt_variant_id=None,  # Added: ready for A/B tests
             test_dataset_id=None,  # Added: ready for test runs
             
+            # NEW: Model configuration
+            temperature=None,
+            max_tokens=None,
+            
+            # NEW: Token breakdown (top-level)
+            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+            
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             # Metadata
             metadata={
                 "job_id": job.get('id'),
@@ -790,6 +844,8 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
                 "match_score": analysis.get('score', 0),
                 "num_matched_bullets": len(matched_bullets),
                 "judged": quality_eval is not None
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
         
@@ -907,12 +963,25 @@ CRITICAL: Return ONLY valid JSON."""
             prompt_variant_id=None,  # Added: ready for A/B tests
             test_dataset_id=None,  # Added: ready for test runs
             
+            # NEW: Model configuration
+            temperature=None,
+            max_tokens=None,
+            
+            # NEW: Token breakdown (top-level)
+            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
+            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+            
+            # NEW: Observability
+            environment=os.getenv("ENVIRONMENT", "development"),
+            
             # Metadata
             metadata={
                 "job_id": job.get('id'),
                 "job_title": job.get('title', 'Unknown'),
                 "match_score": analysis.get('score', 0),
                 "num_weaknesses": len(critique.get('weaknesses', []))
+                "conversation_memory": self.memory,
+                "execution_settings": self.exec_settings
             }
         )
         
