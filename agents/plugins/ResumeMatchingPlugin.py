@@ -174,7 +174,6 @@ class ResumeMatchingPlugin:
                     error=f"Invalid selection: {selection}",
                 
                 # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
                 retry_count=0,
                     prompt=f"Select resume: {selection}",
                     # NEW: Observability
@@ -206,7 +205,6 @@ class ResumeMatchingPlugin:
                 error="Invalid resume index",
                 
                 # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
                 retry_count=0,
                 prompt=f"Select resume: {selection}",
                 # NEW: Observability
@@ -309,7 +307,6 @@ class ResumeMatchingPlugin:
                 error="No resume selected",
                 
                 # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
                 retry_count=0,
                 prompt=f"Filter: {filter_choice}",
                 # NEW: Observability
@@ -395,7 +392,7 @@ class ResumeMatchingPlugin:
                 "filter_choice": filter_choice,
                 "job_filter": job_filter,
                 "result_count": len(job_ids),
-                "resume_id": resume_id
+                "resume_id": resume_id,
                 "resume_name": resume['name'],
                 "is_db_read": True,
                 "conversation_memory": self.memory,
@@ -430,9 +427,7 @@ class ResumeMatchingPlugin:
             metadata={
                 "resume_id": resume_id,
                 "num_jobs": len(job_ids),
-                "operation": "filtered_matching",
-                "conversation_memory": self.memory,
-                "execution_settings": self.exec_settings
+                "operation": "filtered_matching"
             }
         )
         logger.info(f"Starting resume matching: Resume #{resume_id} vs {len(job_ids)} jobs")
@@ -579,7 +574,6 @@ class ResumeMatchingPlugin:
                 error="No memory available",
                 
                 # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
                 retry_count=0,
                 prompt=f"Explain match #{match_number}",
                 # NEW: Observability
@@ -603,7 +597,6 @@ class ResumeMatchingPlugin:
                 error="No recent matches found",
                 
                 # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
                 retry_count=0,
                 prompt=f"Explain match #{match_number}",
                 # NEW: Observability
@@ -625,7 +618,6 @@ class ResumeMatchingPlugin:
                 error=f"Invalid match number: {match_number}",
                 
                 # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
                 retry_count=0,
                 prompt=f"Explain match #{match_number}",
                 # NEW: Observability
@@ -1333,7 +1325,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                     "job_id": job.get('id'),
                     "job_title": job.get('title', 'Unknown'),
                     "original_score": original_score,
-                    "judged": quality_eval is not None
+                    "judged": quality_eval is not None,
                     "conversation_memory": self.memory,
                     "execution_settings": self.exec_settings
                 }

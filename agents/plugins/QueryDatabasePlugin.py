@@ -667,7 +667,7 @@ SQL Query:"""
                     "resume_count": resume_count,
                     "job_count": job_count,
                     "match_count": match_count,
-                    "is_db_read": True
+                    "is_db_read": True,
                     "conversation_memory": self.memory,
                     "execution_settings": self.exec_settings
                 }

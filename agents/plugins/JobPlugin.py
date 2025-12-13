@@ -247,7 +247,7 @@ class JobPlugin:
                     "location": location,
                     "num_results_requested": num_results,
                     "jobs_found": len(jobs),
-                    "is_api_call": True
+                    "is_api_call": True,
                     "conversation_memory": self.memory,        
                     "execution_settings": self.exec_settings
                 }
@@ -477,7 +477,7 @@ class JobPlugin:
                 "jobs_saved": len(jobs_to_save),
                 "query": query,
                 "location": location,
-                "is_db_write": True
+                "is_db_write": True,
                 "conversation_memory": self.memory,
                 "execution_settings": self.exec_settings
             }
@@ -605,7 +605,7 @@ class JobPlugin:
                 metadata={
                     "limit": limit,
                     "jobs_returned": len(jobs),
-                    "is_db_read": True
+                    "is_db_read": True,
                     "conversation_memory": self.memory,
                     "execution_settings": self.exec_settings
                 }
@@ -649,7 +649,7 @@ class JobPlugin:
                 metadata={
                     "limit": limit,
                     "is_db_read": True,
-                    "error_type": type(e).__name__
+                    "error_type": type(e).__name__,
                     "conversation_memory": self.memory,
                     "execution_settings": self.exec_settings
                 }

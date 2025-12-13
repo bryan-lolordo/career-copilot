@@ -112,6 +112,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
     try:
         # Add user message to chat history
         history.add_user_message(message)
+        memory.chat_history = history
         logger.debug(f"Message added to history: {time.time() - start_time:.2f}s")
 
         # Send request to Semantic Kernel / Azure OpenAI
@@ -259,6 +260,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
 
         # Add assistant response to history
         history.add_message(response)
+        memory.chat_history = history
         
         total_time = time.time() - start_time
         logger.info(f"Chat message complete: {total_time:.2f}s total")
@@ -412,6 +414,7 @@ def reset_chat_history():
     logger.info("Resetting chat history and memory")
     
     history = create_chat_history_with_system_prompt()
+    memory.chat_history = history
     # Reset memory context
     memory.context.awaiting_confirmation = False
     memory.context.pending_action = None

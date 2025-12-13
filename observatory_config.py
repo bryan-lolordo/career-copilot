@@ -351,6 +351,21 @@ def extract_token_breakdown_from_messages(
                     breakdown['chat_history_tokens'] = history_tokens
             except Exception:
                 pass  # Silent fail
+
+        # Also try from conversation_memory if it has chat_history stored
+        if not breakdown['chat_history_tokens'] and conversation_memory:
+            try:
+                if hasattr(conversation_memory, 'chat_history'):
+                    history = conversation_memory.chat_history
+                    if hasattr(history, 'messages'):
+                        history_tokens = 0
+                        for msg in history.messages:
+                            if hasattr(msg, 'role') and msg.role != 'system':
+                                content = str(msg.content) if hasattr(msg, 'content') else ''
+                                history_tokens += estimate_tokens(content)
+                        breakdown['chat_history_tokens'] = history_tokens
+            except Exception:
+                pass  # Silent fail
     
     # Method 4: Extract from ConversationMemory context
     if conversation_memory:
@@ -640,6 +655,13 @@ def track_llm_call(
             if metadata is None:
                 metadata = {}
             metadata['agent_role_str'] = agent_role
+    
+    # ⭐ CLEAN METADATA: Remove non-serializable objects before saving
+    if metadata:
+        # Remove conversation_memory (already extracted above)
+        metadata.pop('conversation_memory', None)
+        # Remove execution_settings (already extracted above)
+        metadata.pop('execution_settings', None)
     
     return _sdk_track_llm_call(
         observatory=obs,

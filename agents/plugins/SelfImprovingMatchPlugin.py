@@ -448,7 +448,7 @@ Format:
                 "job_title": job.get('title', 'Unknown'),
                 "iteration_mode": "initial",
                 "has_guidance": bool(guidance),
-                "judged": quality_eval is not None
+                "judged": quality_eval is not None,
                 "conversation_memory": self.memory,
                 "execution_settings": self.exec_settings
             }
@@ -665,7 +665,7 @@ Company: {job.get('company', 'N/A')}
                 "job_title": job.get('title', 'Unknown'),
                 "previous_score": existing_score,
                 "iteration_mode": "refinement",
-                "judged": quality_eval is not None
+                "judged": quality_eval is not None,
                 "conversation_memory": self.context.memory if hasattr(self.context, 'memory') else None,
                 "execution_settings": self.exec_settings
             }
@@ -843,7 +843,7 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
                 "job_title": job.get('title', 'Unknown'),
                 "match_score": analysis.get('score', 0),
                 "num_matched_bullets": len(matched_bullets),
-                "judged": quality_eval is not None
+                "judged": quality_eval is not None,
                 "conversation_memory": self.memory,
                 "execution_settings": self.exec_settings
             }
@@ -979,7 +979,7 @@ CRITICAL: Return ONLY valid JSON."""
                 "job_id": job.get('id'),
                 "job_title": job.get('title', 'Unknown'),
                 "match_score": analysis.get('score', 0),
-                "num_weaknesses": len(critique.get('weaknesses', []))
+                "num_weaknesses": len(critique.get('weaknesses', [])),
                 "conversation_memory": self.memory,
                 "execution_settings": self.exec_settings
             }
