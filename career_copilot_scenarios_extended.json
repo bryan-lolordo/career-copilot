@@ -1,0 +1,404 @@
+[
+  {
+    "scenario_id": "job_search_explore_save",
+    "description": "User searches for jobs, explores specific ones, and saves a subset",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "find me ai engineer jobs in chicago",
+        "expected_tools": ["JobPlugin.find_jobs"],
+        "assertions": ["returns ~10 jobs", "stores last_searched_jobs in memory"]
+      },
+      {
+        "turn": 2,
+        "user": "tell me more about job number 3",
+        "expected_tools": ["JobPlugin.get_job_details"],
+        "assertions": ["references last search", "returns details for job index 3"]
+      },
+      {
+        "turn": 3,
+        "user": "save jobs 3 and 6",
+        "expected_tools": ["JobPlugin.save_searched_jobs"],
+        "assertions": ["saves only specified jobs", "confirms saved count"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "database_exploration",
+    "description": "User explores saved jobs using various database queries",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "how many jobs have I saved total",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns count"]
+      },
+      {
+        "turn": 2,
+        "user": "which companies appear most often",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["groups by company"]
+      },
+      {
+        "turn": 3,
+        "user": "show me the most recent 5 jobs I saved",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["orders by date"]
+      },
+      {
+        "turn": 4,
+        "user": "what's the salary range across all my saved jobs",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["aggregates salary data"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "resume_tailoring_deep_dive",
+    "description": "User requests multiple resume improvements for different aspects",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me my recent matches",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns matches"]
+      },
+      {
+        "turn": 2,
+        "user": "help me improve my technical skills bullet for the top match",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["focuses on technical skills"]
+      },
+      {
+        "turn": 3,
+        "user": "now help me with a leadership experience bullet for the same job",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["focuses on leadership"]
+      },
+      {
+        "turn": 4,
+        "user": "what about my project experience",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["focuses on projects"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "match_analysis_comparison",
+    "description": "User compares multiple job matches and analyzes differences",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me my top 3 matches",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns top 3"]
+      },
+      {
+        "turn": 2,
+        "user": "explain why the first match scored higher than the second",
+        "expected_tools": ["ResumeMatching.explain_recent_match"],
+        "assertions": ["comparative analysis"]
+      },
+      {
+        "turn": 3,
+        "user": "what skills do I need for the second one that I don't need for the first",
+        "expected_tools": [],
+        "assertions": ["analyzes skill differences"]
+      },
+      {
+        "turn": 4,
+        "user": "which match would be easier for me to get",
+        "expected_tools": [],
+        "assertions": ["evaluates difficulty"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "self_improvement_iterations",
+    "description": "Agent iteratively improves match analysis multiple times",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show my highest rated match",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns top match"]
+      },
+      {
+        "turn": 2,
+        "user": "critique and improve this match analysis",
+        "expected_tools": ["SelfImprovingMatch.self_improve_single_match"],
+        "assertions": ["runs improvement iterations"]
+      },
+      {
+        "turn": 3,
+        "user": "explain what improvements you made",
+        "expected_tools": [],
+        "assertions": ["describes changes"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "location_and_remote_filtering",
+    "description": "User explores jobs by location and remote options",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "which of my saved jobs are fully remote",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by remote"]
+      },
+      {
+        "turn": 2,
+        "user": "how many are in chicago",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by location"]
+      },
+      {
+        "turn": 3,
+        "user": "show me hybrid positions",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by hybrid"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "skills_gap_analysis",
+    "description": "User analyzes skill gaps across multiple jobs",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "what are the most common required skills across my saved jobs",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["aggregates skills"]
+      },
+      {
+        "turn": 2,
+        "user": "show me matches where I'm missing python",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by missing skill"]
+      },
+      {
+        "turn": 3,
+        "user": "which jobs require the most skills I don't have",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["ranks by gap count"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "experience_level_filtering",
+    "description": "User explores jobs by experience requirements",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me entry level positions",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by level"]
+      },
+      {
+        "turn": 2,
+        "user": "what about senior roles",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by senior"]
+      },
+      {
+        "turn": 3,
+        "user": "which level has the best match scores for me",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["aggregates by level"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "resume_bullet_variations",
+    "description": "User generates multiple variations of resume bullets",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me a job I matched well with",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns good match"]
+      },
+      {
+        "turn": 2,
+        "user": "create a concise bullet highlighting my AI experience for this role",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["generates concise bullet"]
+      },
+      {
+        "turn": 3,
+        "user": "now make it more detailed with metrics",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["adds metrics"]
+      },
+      {
+        "turn": 4,
+        "user": "one more focusing on business impact instead",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["business focus"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "match_score_investigation",
+    "description": "User investigates why certain matches scored the way they did",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me matches with scores between 7 and 8",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by score range"]
+      },
+      {
+        "turn": 2,
+        "user": "explain what's holding the first one back from a higher score",
+        "expected_tools": ["ResumeMatching.explain_recent_match"],
+        "assertions": ["analyzes limiting factors"]
+      },
+      {
+        "turn": 3,
+        "user": "what would I need to add to my resume to improve this score",
+        "expected_tools": [],
+        "assertions": ["suggests improvements"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "company_research",
+    "description": "User researches specific companies in saved jobs",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me all jobs from microsoft",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["filters by company"]
+      },
+      {
+        "turn": 2,
+        "user": "how do my match scores compare across these microsoft jobs",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["compares scores"]
+      },
+      {
+        "turn": 3,
+        "user": "which microsoft job am I best qualified for",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["ranks by qualification"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "temporal_analysis",
+    "description": "User analyzes how their job search has evolved over time",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "when did I start saving jobs",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["finds earliest date"]
+      },
+      {
+        "turn": 2,
+        "user": "show me my activity by week",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["groups by time"]
+      },
+      {
+        "turn": 3,
+        "user": "are my recent matches scoring higher than earlier ones",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["trend analysis"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "multi_aspect_tailoring",
+    "description": "User tailors resume for multiple aspects of one job",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me my top match",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns top match"]
+      },
+      {
+        "turn": 2,
+        "user": "help me write a summary statement for this job",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["creates summary"]
+      },
+      {
+        "turn": 3,
+        "user": "now a bullet about my collaboration experience",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["collaboration focus"]
+      },
+      {
+        "turn": 4,
+        "user": "and one about problem-solving",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["problem-solving focus"]
+      },
+      {
+        "turn": 5,
+        "user": "finally one highlighting my results and impact",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["results focus"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "salary_analysis",
+    "description": "User analyzes salary information across jobs",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "what's the average salary of my saved jobs",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["calculates average"]
+      },
+      {
+        "turn": 2,
+        "user": "show me the highest paying ones",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["orders by salary"]
+      },
+      {
+        "turn": 3,
+        "user": "do higher salaries correlate with my match scores",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["correlation analysis"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "comprehensive_match_review",
+    "description": "User does deep review of a single match",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me a job I matched at exactly 8.5 score",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["finds specific score"]
+      },
+      {
+        "turn": 2,
+        "user": "explain this match in detail",
+        "expected_tools": ["ResumeMatching.explain_recent_match"],
+        "assertions": ["detailed explanation"]
+      },
+      {
+        "turn": 3,
+        "user": "improve this analysis with self-critique",
+        "expected_tools": ["SelfImprovingMatch.self_improve_single_match"],
+        "assertions": ["runs self-improvement"]
+      },
+      {
+        "turn": 4,
+        "user": "now create tailored bullets for my top 3 strengths for this role",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["creates strength bullets"]
+      }
+    ]
+  }
+]

@@ -122,6 +122,9 @@ class ConversationMemory:
         # ADD THESE TWO LINES:
         self.conversation_id = None  # Set by chatbot/kernel before each turn
         self.turn_number = 0         # Incremented by chatbot/kernel for each user message
+        
+        # Parent call tracking - groups all LLM calls from one user request
+        self.request_id = None       # UUID generated per user message, used as parent_call_id
     
     def update_context(self, **kwargs):
         """Update any aspect of the conversation context"""

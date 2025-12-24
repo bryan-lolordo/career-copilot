@@ -19,9 +19,14 @@ Usage:
 
 UPDATED: Now supports all 139 fields including conversation linking, model config,
          tool tracking, streaming, error details, experiments, and observability.
+         
+ADDED (Dec 2025): classify_error() and generate_cache_key() helpers for 
+                  error classification and cache key generation.
 """
 
 import os
+import re
+import hashlib
 from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv
 
@@ -59,11 +64,16 @@ from observatory import (
     PromptBreakdown,
     PromptMetadata,
     
-    # NEW: Additional models for complete schema
+    # Additional models for complete schema
     ModelConfig,
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
+
+    # Semantic Cache
+    SemanticCache,
+    SemanticCacheResult,
+    create_semantic_cache_metadata,
 )
 
 # =============================================================================
@@ -141,8 +151,8 @@ judge = LLMJudge(
         "generate_refinements",  # Low-value planning operation
     },
     
-    # Evaluate 50% of judge-worthy calls
-    sample_rate=0.5,
+    # Evaluate 100% of judge-worthy calls
+    sample_rate=1.0,
     
     # Career advice domain criteria (must sum to 1.0)
     criteria={
@@ -197,6 +207,64 @@ cache = CacheManager(
     default_ttl=3600,       # 1 hour default
     max_entries=1000,       # Max cache size
     normalize_prompts=True, # Normalize for better cache hits
+)
+
+# =============================================================================
+# CONFIGURE SEMANTIC CACHE - VECTOR-BASED SIMILARITY MATCHING
+# =============================================================================
+# Unlike CacheManager (exact hash match), SemanticCache uses embeddings to find
+# semantically similar prompts. "Find Python jobs" ≈ "Search for Python positions"
+#
+# pip install chromadb  (required dependency)
+
+semantic_cache = SemanticCache(
+    observatory=obs,
+    
+    operations={
+        # ═══════════════════════════════════════════════════════════════
+        # HIGH VALUE - SQL Generation
+        # ═══════════════════════════════════════════════════════════════
+        # Users ask similar questions in different ways:
+        #   "show me jobs from Deloitte" ≈ "find Deloitte jobs" ≈ "Deloitte positions"
+        # 
+        # Analysis showed ~20% duplicate patterns in generate_sql
+        "generate_sql": {
+            "ttl": 86400,       # 24 hours (SQL patterns are stable)
+            "threshold": 0.95,  # 95% - high precision (exact SQL matters)
+            "cluster_id": "sql_generation",
+        },
+        
+        # ═══════════════════════════════════════════════════════════════
+        # HIGH VALUE - Quick Scoring
+        # ═══════════════════════════════════════════════════════════════
+        # Same resume scored against many similar jobs:
+        #   "Python Developer at Google" ≈ "Python Engineer at Meta"
+        #
+        # High volume operation - significant savings potential
+        "quick_score_job": {
+            "ttl": 3600,        # 1 hour (job relevance can change)
+            "threshold": 0.90,  # 90% - jobs in same domain match well
+            "cluster_id": "resume_matching",
+        },
+        
+        # ═══════════════════════════════════════════════════════════════
+        # MEDIUM VALUE - Deep Analysis
+        # ═══════════════════════════════════════════════════════════════
+        # Expensive operation (~2000+ tokens per call)
+        # Worth caching aggressively with lower threshold
+        "deep_analyze_job": {
+            "ttl": 3600,        # 1 hour
+            "threshold": 0.88,  # 88% - lower threshold for expensive ops
+            "cluster_id": "deep_analysis",
+        },
+    },
+    
+    # Defaults for any operation not explicitly configured
+    default_ttl=3600,
+    default_threshold=0.92,
+    
+    # Master switch - set to False to disable without removing config
+    enabled=False,
 )
 
 # =============================================================================
@@ -280,6 +348,155 @@ prompts = PromptManager(observatory=obs)
 #     weights={"control": 0.5, "concise": 0.25, "structured": 0.25},
 #     description="Testing different system prompt styles for career advice",
 # )
+
+
+# =============================================================================
+# HELPER FUNCTIONS: Error Classification & Cache Key Generation
+# =============================================================================
+
+def classify_error(error: Exception, operation: str = None) -> dict:
+    """
+    Classify errors for tracking. Returns dict with error_type, error_code, error_category.
+    
+    Use with ** unpacking in track_llm_call:
+        track_llm_call(
+            ...
+            **classify_error(e, operation="generate_sql"),
+            retry_count=0,
+            ...
+        )
+    
+    Categories:
+        - database_schema: Column/table not found errors
+        - database: Other database errors
+        - network: Timeout errors
+        - throttling: Rate limit errors
+        - data_missing: Not found errors
+        - input_error: Validation errors
+        - response_format: JSON parse errors
+        - unclassified: Unknown errors
+    
+    Args:
+        error: The exception that was caught
+        operation: Optional operation name for context
+        
+    Returns:
+        Dict with error_type, error_code, error_category
+    """
+    error_str = str(error).lower()
+    error_type = type(error).__name__
+    
+    # Database schema errors (e.g., "no such column: salary")
+    if "no such column" in error_str or "no such table" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "SCHEMA_ERROR",
+            "error_category": "database_schema"
+        }
+    
+    # Timeout errors
+    elif "timeout" in error_str or "timed out" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "TIMEOUT",
+            "error_category": "network"
+        }
+    
+    # Rate limiting
+    elif "rate limit" in error_str or "429" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "RATE_LIMIT",
+            "error_category": "throttling"
+        }
+    
+    # Not found errors
+    elif re.search(r"not found|no .* found", error_str):
+        return {
+            "error_type": error_type,
+            "error_code": "NOT_FOUND",
+            "error_category": "data_missing"
+        }
+    
+    # Validation errors
+    elif "invalid" in error_str or "validation" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "VALIDATION",
+            "error_category": "input_error"
+        }
+    
+    # JSON parse errors
+    elif "json" in error_str or "parse" in error_str or "decode" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "PARSE_ERROR",
+            "error_category": "response_format"
+        }
+    
+    # SQLite specific (catch-all for other DB errors)
+    elif "sqlite" in error_type.lower() or "database" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "DB_ERROR",
+            "error_category": "database"
+        }
+    
+    # Connection errors
+    elif "connection" in error_str or "connect" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "CONNECTION_ERROR",
+            "error_category": "network"
+        }
+    
+    # Authentication errors
+    elif "auth" in error_str or "unauthorized" in error_str or "401" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "AUTH_ERROR",
+            "error_category": "authentication"
+        }
+    
+    # Default - unclassified
+    else:
+        return {
+            "error_type": error_type,
+            "error_code": "UNKNOWN",
+            "error_category": "unclassified"
+        }
+
+
+def generate_cache_key(operation: str, *key_parts) -> str:
+    """
+    Generate a cache key from operation + identifying content.
+    
+    Creates a deterministic hash that can be used to:
+    1. Identify duplicate calls (same key = potential cache hit)
+    2. Track cache performance
+    3. Enable semantic caching when activated
+    
+    Usage:
+        # For resume-job matching
+        cache_key = generate_cache_key("quick_score_job", resume_text[:500], job.get('id'))
+        
+        # For SQL generation
+        cache_key = generate_cache_key("generate_sql", question)
+        
+        # For deep analysis
+        cache_key = generate_cache_key("deep_analyze_job", resume_text[:500], job.get('id'))
+    
+    Args:
+        operation: The operation name (e.g., "quick_score_job", "generate_sql")
+        *key_parts: Variable arguments that uniquely identify this call
+                   (e.g., resume text, job ID, user query)
+    
+    Returns:
+        16-character hex hash string
+    """
+    # Combine operation with key parts, truncating each part to avoid huge keys
+    combined = f"{operation}:" + ":".join(str(p)[:500] for p in key_parts if p)
+    return hashlib.md5(combined.encode()).hexdigest()[:16]
 
 
 # =============================================================================
@@ -504,6 +721,7 @@ def track_llm_call(
     # NEW: ERROR DETAILS
     error_type: str = None,
     error_code: str = None,
+    error_category: str = None,  # Added for classify_error() support
     retry_count: int = None,
     error_details: ErrorDetails = None,
     
@@ -590,6 +808,7 @@ def track_llm_call(
         # NEW: ERROR DETAILS
         error_type: Error classification (RATE_LIMIT, TIMEOUT, etc.)
         error_code: Provider error code (429, 500, etc.)
+        error_category: Error category from classify_error()
         retry_count: Number of retries attempted
         error_details: Full ErrorDetails object
         
@@ -645,6 +864,19 @@ def track_llm_call(
         max_tokens = max_tokens if max_tokens is not None else model_params['max_tokens']
         top_p = top_p if top_p is not None else model_params['top_p']
     
+    # ⭐ NEW: Auto-create prompt_breakdown if system_prompt or user_message provided
+    # This ensures these fields get extracted to columns for Stories 2 & 6
+    if (system_prompt or user_message) and not prompt_breakdown:
+        prompt_breakdown = create_prompt_breakdown(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            system_prompt_tokens=system_prompt_tokens,
+            user_message_tokens=user_message_tokens,
+            chat_history_tokens=chat_history_tokens,
+            chat_history_count=None,
+            response_text=response_text,
+        )
+    
     # Convert string agent_role to AgentRole enum if provided
     role_enum = None
     if agent_role:
@@ -658,9 +890,7 @@ def track_llm_call(
     
     # ⭐ CLEAN METADATA: Remove non-serializable objects before saving
     if metadata:
-        # Remove conversation_memory (already extracted above)
         metadata.pop('conversation_memory', None)
-        # Remove execution_settings (already extracted above)
         metadata.pop('execution_settings', None)
     
     return _sdk_track_llm_call(
@@ -767,6 +997,7 @@ __all__ = [
     'cache',
     'router',
     'prompts',
+    'semantic_cache',
     
     # Config values
     'PROJECT_NAME',
@@ -778,6 +1009,10 @@ __all__ = [
     'track_llm_call',
     'start_session',
     'end_session',
+    
+    # Helper functions for error classification and cache keys
+    'classify_error',
+    'generate_cache_key',
     
     # Re-exported for convenience
     'create_routing_decision',
@@ -795,9 +1030,13 @@ __all__ = [
     'PromptMetadata',
     'AgentRole',
     
-    # NEW: Additional types
+    # Additional types
     'ModelConfig',
     'StreamingMetrics',
     'ExperimentMetadata',
     'ErrorDetails',
+
+    # Semantic cache helpers
+    'SemanticCacheResult',
+    'create_semantic_cache_metadata',
 ]

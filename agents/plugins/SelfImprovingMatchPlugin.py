@@ -29,6 +29,8 @@ from observatory_config import (
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
+    classify_error,
+    generate_cache_key
 )
 
 # Configure logging
@@ -118,9 +120,20 @@ class SelfImprovingMatchPlugin:
         
         db_service = self.matching_plugin.db
         
-        # Get resume and job data
-        resume = db_service.get_resume_by_id(int(resume_id))
-        job = db_service.get_job_by_id(int(job_id))
+        # Handle both IDs and names
+        try:
+            resume = db_service.get_resume_by_id(int(resume_id))
+        except ValueError:
+            # resume_id is a name, look it up
+            resumes = db_service.get_all_resumes()
+            resume = next((r for r in resumes if r.get('name') == resume_id), None)
+
+        try:
+            job = db_service.get_job_by_id(int(job_id))
+        except ValueError:
+            # job_id is a title, look it up
+            jobs = db_service.search_jobs(job_id, limit=1)
+            job = jobs[0] if jobs else None
         
         if not resume or not job:
             return json.dumps({'error': 'Resume or job not found'})
@@ -381,6 +394,8 @@ Format:
             prompt=full_prompt[:5000],
             response=result_str[:5000],
             llm_client=self.kernel, 
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None, 
         )
         
         # Tier 3: Routing decision (placeholder - ready for optimization)
@@ -394,7 +409,7 @@ Format:
         # Tier 3: Cache metadata (placeholder - ready for optimization)
         cache_metadata = create_cache_metadata(
             cache_hit=False,
-            cache_key=None,
+            cache_key=generate_cache_key("deep_analyze_with_guidance", resume_text[:500], job.get('id')),
             cache_cluster_id="deep_analysis"
         ) if create_cache_metadata else None
         
@@ -430,6 +445,7 @@ Format:
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
 
             # NEW: Model configuration
             temperature=0.7,  # Creative writing for resume improvement
@@ -598,6 +614,8 @@ Company: {job.get('company', 'N/A')}
             prompt=full_prompt[:5000],
             response=result_str[:5000],
             llm_client=self.kernel, 
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None, 
         )
         
         # Tier 3: Routing decision (placeholder)
@@ -611,7 +629,7 @@ Company: {job.get('company', 'N/A')}
         # Tier 3: Cache metadata (placeholder)
         cache_metadata = create_cache_metadata(
             cache_hit=False,
-            cache_key=None,
+            cache_key=generate_cache_key("refine_analysis", resume_text[:500], job.get('id')),
             cache_cluster_id="refinement_analysis"
         ) if create_cache_metadata else None
         
@@ -645,8 +663,9 @@ Company: {job.get('company', 'N/A')}
             test_dataset_id=None,  # Added: ready for test runs
             
             # NEW: Conversation linking
-            conversation_id=self.context.memory.conversation_id if hasattr(self.context, 'memory') and self.context.memory else None,
-            turn_number=self.context.memory.turn_number if hasattr(self.context, 'memory') and self.context.memory else None,
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
             
             # NEW: Model configuration
             temperature=0.5,  # Balanced analysis
@@ -780,6 +799,9 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             prompt=full_prompt,
             response=result_str,
             llm_client=self.kernel, 
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
         )
         
         # Tier 3: Routing decision (placeholder)
@@ -793,7 +815,7 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
         # Tier 3: Cache metadata (placeholder)
         cache_metadata = create_cache_metadata(
             cache_hit=False,
-            cache_key=None,
+            cache_key=generate_cache_key("critique_match", job.get('id'), analysis.get('score')),
             cache_cluster_id="critique"
         ) if create_cache_metadata else None
         
@@ -833,6 +855,11 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             # NEW: Token breakdown (top-level)
             system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
             user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
             
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -930,7 +957,7 @@ CRITICAL: Return ONLY valid JSON."""
         # Tier 3: Cache metadata (placeholder)
         cache_metadata = create_cache_metadata(
             cache_hit=False,
-            cache_key=None,
+            cache_key=generate_cache_key("generate_refinements", job.get('id'), analysis.get('score')),
             cache_cluster_id="refinements"
         ) if create_cache_metadata else None
         
@@ -966,6 +993,11 @@ CRITICAL: Return ONLY valid JSON."""
             # NEW: Model configuration
             temperature=None,
             max_tokens=None,
+
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
             
             # NEW: Token breakdown (top-level)
             system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,

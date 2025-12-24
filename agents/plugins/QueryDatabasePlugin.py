@@ -31,6 +31,9 @@ from observatory_config import (
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
+    classify_error,
+    generate_cache_key,
+    semantic_cache,
 )
 
 # Configure logging
@@ -175,14 +178,38 @@ SQL Query:"""
             # Track LLM call for SQL generation
             llm_start_time = time.time()
             
-            result = await self.kernel.invoke_prompt(full_prompt)
+            # ═══════════════════════════════════════════════════════════════
+            # CHECK SEMANTIC CACHE FIRST
+            # ═══════════════════════════════════════════════════════════════
+            cache_result = await semantic_cache.get(full_prompt, operation="generate_sql")
             
-            latency_ms = (time.time() - llm_start_time) * 1000
-            generated_sql = str(result).strip()
-            
-            # Estimate tokens
-            prompt_tokens = len(full_prompt) // 4
-            completion_tokens = len(generated_sql) // 4
+            if cache_result.hit:
+                # Cache HIT - use cached response
+                latency_ms = (time.time() - llm_start_time) * 1000
+                generated_sql = cache_result.response
+                prompt_tokens = 0  # No tokens used
+                completion_tokens = 0
+                cache_hit = True
+                cache_key = cache_result.cache_key
+                print(f"   ✅ Cache HIT ({cache_result.similarity:.1%} similar)")
+            else:
+                # Cache MISS - call LLM
+                result = await self.kernel.invoke_prompt(full_prompt)
+                latency_ms = (time.time() - llm_start_time) * 1000
+                generated_sql = str(result).strip()
+                prompt_tokens = len(full_prompt) // 4
+                completion_tokens = len(generated_sql) // 4
+                cache_hit = False
+                
+                # Store in cache for next time
+                cache_key = await semantic_cache.set(
+                    full_prompt, 
+                    generated_sql, 
+                    operation="generate_sql",
+                    metadata={"question": question}
+                )
+                print(f"   💾 Cached for future use")
+            # ═══════════════════════════════════════════════════════════════
             
             # Create prompt breakdown for Tier 2
             prompt_breakdown = create_prompt_breakdown(
@@ -197,22 +224,25 @@ SQL Query:"""
                 operation="generate_sql",
                 prompt=full_prompt,
                 response=generated_sql,
-                llm_client=self.kernel, 
+                llm_client=self.kernel,
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None, 
             )
             
             # Tier 3: Routing decision (placeholder - ready for optimization)
             routing_decision = create_routing_decision(
-                chosen_model=DEFAULT_MODEL,  # Will be filled by observatory_config
+                chosen_model=DEFAULT_MODEL,
                 alternative_models=["gpt-4o", "gpt-4o-mini"],
                 reasoning="SQL generation - deterministic task",
                 complexity_score=0.4
             ) if create_routing_decision else None
             
-            # Tier 3: Cache metadata (placeholder - ready for optimization)
+            # Tier 3: Cache metadata - WITH REAL DATA
             cache_metadata = create_cache_metadata(
-                cache_hit=False,
-                cache_key=None,
-                cache_cluster_id="sql_generation"
+                cache_hit=cache_hit,
+                cache_key=cache_key,
+                cache_cluster_id="sql_generation",
+                similarity_score=cache_result.similarity if cache_hit else None,
             ) if create_cache_metadata else None
             
             # Track in Observatory - COMPLETE with all tiers
@@ -222,9 +252,9 @@ SQL Query:"""
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
                 agent_name="DatabaseQuery",
-                agent_role="analyst",  # Added: agent role
+                agent_role="analyst",
                 operation="generate_sql",
-                success=True,  # Added: explicit success
+                success=True,
                 
                 # Prompt analysis (Tier 2)
                 system_prompt=system_prompt,
@@ -247,6 +277,7 @@ SQL Query:"""
                 # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Model configuration
                 temperature=0.0,  # SQL generation should be deterministic
@@ -320,8 +351,29 @@ SQL Query:"""
             return result_text
             
         except sqlite3.Error as e:
-            # Track database error
+            # Phase 2 Fix: Complete error tracking with token breakdown, routing, cache
+            
+            # Token breakdown (use cached values if available)
+            _system_tokens = len(system_prompt) // 4 if 'system_prompt' in locals() else None
+            _user_tokens = len(user_message) // 4 if 'user_message' in locals() else None
+            
+            # Routing decision (same as success path)
+            _routing = create_routing_decision(
+                chosen_model=DEFAULT_MODEL,
+                alternative_models=["gpt-4o", "gpt-4o-mini"],
+                reasoning="SQL generation - deterministic task (error path)",
+                complexity_score=0.4
+            ) if create_routing_decision else None
+            
+            # Cache metadata (use values from earlier if available)
+            _cache_meta = create_cache_metadata(
+                cache_hit=cache_hit if 'cache_hit' in locals() else False,
+                cache_key=cache_key if 'cache_key' in locals() else generate_cache_key("generate_sql", question),
+                cache_cluster_id="sql_generation",
+            ) if create_cache_metadata else None
+            
             track_llm_call(
+                # Core metrics (Tier 1)
                 prompt_tokens=len(full_prompt) // 4 if 'full_prompt' in locals() else 0,
                 completion_tokens=len(generated_sql) // 4 if 'generated_sql' in locals() else 0,
                 latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
@@ -332,22 +384,73 @@ SQL Query:"""
                 error=f"Database error: {str(e)}",
                 prompt_metadata=SQL_PROMPT_META,
                 
-                # NEW: Error details
+                # Prompt content (Tier 2) - Phase 2 addition
+                system_prompt=system_prompt if 'system_prompt' in locals() else None,
+                user_message=user_message if 'user_message' in locals() else None,
+                response_text=generated_sql if 'generated_sql' in locals() else None,
+                
+                # Token breakdown (Tier 2) - Phase 2 addition
+                system_prompt_tokens=_system_tokens,
+                user_message_tokens=_user_tokens,
+                
+                # Model config (Tier 2)
+                temperature=0.0,
+                
+                # Routing decision (Tier 3) - Phase 2 addition
+                routing_decision=_routing,
+                
+                # Cache metadata (Tier 3) - Phase 2 addition
+                cache_metadata=_cache_meta,
+                
+                # Error details
                 error_type="sqlite_error",
                 retry_count=0,
+
+                # Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
-                # NEW: Observability
+                # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
-                metadata={"question": question[:200], "error_type": "sqlite_error", "conversation_memory": self.memory, "execution_settings": self.exec_settings}                
+                metadata={
+                    "question": question[:200],
+                    "generated_sql": generated_sql[:300] if 'generated_sql' in locals() else None,
+                    "error_type": "sqlite_error",
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
+                }
             )
             return f"❌ Database error: {str(e)}\nGenerated SQL was: {generated_sql if 'generated_sql' in locals() else 'N/A'}"
-            
+
+        # generate_sql    
         except Exception as e:
-            # Track general error
+            # Phase 2 Fix: Complete error tracking with token breakdown, routing, cache
+            
+            # Token breakdown (use cached values if available)
+            _system_tokens = len(system_prompt) // 4 if 'system_prompt' in locals() else None
+            _user_tokens = len(user_message) // 4 if 'user_message' in locals() else None
+            
+            # Routing decision (same as success path)
+            _routing = create_routing_decision(
+                chosen_model=DEFAULT_MODEL,
+                alternative_models=["gpt-4o", "gpt-4o-mini"],
+                reasoning="SQL generation - deterministic task (error path)",
+                complexity_score=0.4
+            ) if create_routing_decision else None
+            
+            # Cache metadata (use values from earlier if available)
+            _cache_meta = create_cache_metadata(
+                cache_hit=cache_hit if 'cache_hit' in locals() else False,
+                cache_key=cache_key if 'cache_key' in locals() else generate_cache_key("generate_sql", question),
+                cache_cluster_id="sql_generation",
+            ) if create_cache_metadata else None
+            
             track_llm_call(
-                prompt_tokens=0,
-                completion_tokens=0,
+                # Core metrics (Tier 1)
+                prompt_tokens=len(full_prompt) // 4 if 'full_prompt' in locals() else 0,
+                completion_tokens=len(generated_sql) // 4 if 'generated_sql' in locals() else 0,
                 latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
                 agent_name="DatabaseQuery",
                 agent_role="analyst",
@@ -356,14 +459,43 @@ SQL Query:"""
                 error=str(e),
                 prompt_metadata=SQL_PROMPT_META,
                 
-                # NEW: Error details
-                error_type=type(e).__name__,
-                retry_count=0,
+                # Prompt content (Tier 2) - Phase 2 addition
+                system_prompt=system_prompt if 'system_prompt' in locals() else None,
+                user_message=user_message if 'user_message' in locals() else None,
+                response_text=generated_sql if 'generated_sql' in locals() else None,
                 
-                # NEW: Observability
+                # Token breakdown (Tier 2) - Phase 2 addition
+                system_prompt_tokens=_system_tokens,
+                user_message_tokens=_user_tokens,
+                
+                # Model config (Tier 2)
+                temperature=0.0,
+                
+                # Routing decision (Tier 3) - Phase 2 addition
+                routing_decision=_routing,
+                
+                # Cache metadata (Tier 3) - Phase 2 addition
+                cache_metadata=_cache_meta,
+                
+                # ERROR CLASSIFICATION
+                **classify_error(e, operation="generate_sql"),
+                retry_count=0,
+
+                # Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+                
+                # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
-                metadata={"question": question[:200], "error_type": "general_error", "conversation_memory": self.memory, "execution_settings": self.exec_settings}  
+                metadata={
+                    "question": question[:200],
+                    "generated_sql": generated_sql[:300] if 'generated_sql' in locals() else None,
+                    "error_type": "general_error",
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings
+                }
             )
             return f"❌ Error processing query: {str(e)}"
     
@@ -461,6 +593,11 @@ SQL Query:"""
                 quality_evaluation=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -477,7 +614,8 @@ SQL Query:"""
             )
             
             return result
-            
+
+        # get_top_matches    
         except Exception as e:
             track_llm_call(
                 prompt_tokens=0,
@@ -490,8 +628,13 @@ SQL Query:"""
                 error=str(e),
                 
                 # NEW: Error details
-                error_type=type(e).__name__,
+                **classify_error(e, operation="get_top_matches"),
                 retry_count=0,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -559,6 +702,11 @@ SQL Query:"""
                 quality_evaluation=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -573,7 +721,8 @@ SQL Query:"""
             )
             
             return result
-            
+
+        # get_recent_saved_jobs    
         except Exception as e:
             track_llm_call(
                 prompt_tokens=0,
@@ -586,8 +735,13 @@ SQL Query:"""
                 error=str(e),
                 
                 # NEW: Error details
-                error_type=type(e).__name__,
+                **classify_error(e, operation="get_recent_saved_jobs"),
                 retry_count=0,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -659,6 +813,11 @@ SQL Query:"""
                 quality_evaluation=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -674,7 +833,8 @@ SQL Query:"""
             )
             
             return stats
-            
+
+        # get_database_stats    
         except Exception as e:
             track_llm_call(
                 prompt_tokens=0,
@@ -687,8 +847,13 @@ SQL Query:"""
                 error=str(e),
                 
                 # NEW: Error details
-                error_type=type(e).__name__,
+                **classify_error(e, operation="get_database_stats"),
                 retry_count=0,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),

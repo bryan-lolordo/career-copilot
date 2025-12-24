@@ -14,6 +14,7 @@ import os
 from services.job_api import search_jobs
 from services.db import save_jobs
 
+# Observatory Integration - Complete imports
 from observatory_config import (
     start_session,
     end_session,
@@ -29,7 +30,10 @@ from observatory_config import (
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
+    classify_error,
+    generate_cache_key
 )
+
 
 # =============================================================================
 # PROMPT VERSIONING (for API operations)
@@ -160,6 +164,7 @@ class JobPlugin:
                     # NEW: Conversation linking
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                     
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -237,6 +242,7 @@ class JobPlugin:
                 # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                     
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -280,12 +286,13 @@ class JobPlugin:
                 test_dataset_id=None,
                 
                 # NEW: Error details
-                error_type=type(e).__name__,
+                **classify_error(e, operation="find_jobs"),
                 retry_count=0,
 
                 # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -326,7 +333,7 @@ class JobPlugin:
         
         jobs = self.context.last_searched_jobs
         
-        if job_number < 1 or job_number > len(jobs):
+        if not jobs or job_number < 1 or job_number > len(jobs):
             return f"❌ Invalid job number. Please choose between 1 and {len(jobs)}."
         
         job = jobs[job_number - 1]
@@ -467,6 +474,7 @@ class JobPlugin:
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
             
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -545,6 +553,7 @@ class JobPlugin:
                     # NEW: Conversation linking
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
 
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -598,6 +607,7 @@ class JobPlugin:
                 # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -636,12 +646,13 @@ class JobPlugin:
                 test_dataset_id=None,
                 
                 # NEW: Error details
-                error_type=type(e).__name__,
+                **classify_error(e, operation="get_saved_jobs"),
                 retry_count=0,
 
                 # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),

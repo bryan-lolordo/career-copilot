@@ -2,6 +2,7 @@
 """
 Resume Matching Plugin - Career Copilot
 UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
+UPDATED: Semantic cache integration for quick_score_job and deep_analyze_job
 """
 
 from semantic_kernel.functions import kernel_function
@@ -27,6 +28,9 @@ from observatory_config import (
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
+    classify_error,
+    generate_cache_key,
+    semantic_cache,  
 )
 
 # Configure logging
@@ -94,6 +98,12 @@ class ResumeMatchingPlugin:
                 success=True,
                 prompt="List all resumes",
                 response_text="No resumes found",
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -123,6 +133,12 @@ class ResumeMatchingPlugin:
             success=True,
             prompt="List all resumes",
             response_text=response[:500],
+
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
             
@@ -173,13 +189,23 @@ class ResumeMatchingPlugin:
                     success=False,
                     error=f"Invalid selection: {selection}",
                 
-                # NEW: Error details
-                retry_count=0,
-                    prompt=f"Select resume: {selection}",
+                    # NEW: Error details
+                    error_type="ValidationError",
+                    retry_count=0,
+                    
+                    # NEW: Conversation linking
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+                    
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
                     
-                    metadata={"selection": selection}
+                    metadata={
+                        "selection": selection,
+                        "conversation_memory": self.memory,
+                        "execution_settings": self.exec_settings,
+                    }
                 )
                 return "❌ I didn't understand that selection. Please say 'first', 'second', or a number like '1' or '2'."
         
@@ -207,10 +233,21 @@ class ResumeMatchingPlugin:
                 # NEW: Error details
                 retry_count=0,
                 prompt=f"Select resume: {selection}",
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
-                metadata={"selection": selection, "resume_index": resume_index}
+                metadata={
+                    "selection": selection,
+                    "resume_index": resume_index,
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings,
+                }
             )
             return f"❌ Invalid selection. Please choose between 1 and {len(resumes) if resumes else 0}."
         
@@ -262,6 +299,12 @@ class ResumeMatchingPlugin:
             success=True,
             prompt=f"Select resume: {selection}",
             response_text=response[:500],
+
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
             
@@ -309,6 +352,12 @@ class ResumeMatchingPlugin:
                 # NEW: Error details
                 retry_count=0,
                 prompt=f"Filter: {filter_choice}",
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -362,6 +411,12 @@ class ResumeMatchingPlugin:
                 success=True,
                 prompt=f"Filter: {filter_choice}",
                 response_text="No jobs found",
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -385,6 +440,12 @@ class ResumeMatchingPlugin:
             success=True,
             prompt=f"Filter: {filter_choice}",
             response_text=f"Starting match for {len(job_ids)} jobs",
+
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
             
@@ -438,10 +499,6 @@ class ResumeMatchingPlugin:
             resume = self.db.get_resume_by_id(resume_id)
             if not resume:
                 end_session(session, success=False, error="Resume not found")
-                
-                # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
-                retry_count=0,
                 return f"❌ Error: Resume with ID {resume_id} not found."
             
             resume_text = resume.get('content', '')
@@ -456,10 +513,6 @@ class ResumeMatchingPlugin:
             
             if not jobs:
                 end_session(session, success=False, error="No jobs found")
-                
-                # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
-                retry_count=0,
                 return "❌ No jobs found for matching."
             
             logger.info(f"Phase 1: Quick scoring {len(jobs)} jobs...")
@@ -576,6 +629,12 @@ class ResumeMatchingPlugin:
                 # NEW: Error details
                 retry_count=0,
                 prompt=f"Explain match #{match_number}",
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -599,6 +658,12 @@ class ResumeMatchingPlugin:
                 # NEW: Error details
                 retry_count=0,
                 prompt=f"Explain match #{match_number}",
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -620,6 +685,12 @@ class ResumeMatchingPlugin:
                 # NEW: Error details
                 retry_count=0,
                 prompt=f"Explain match #{match_number}",
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -671,6 +742,12 @@ class ResumeMatchingPlugin:
             success=True,
             prompt=f"Explain match #{match_number}",
             response_text=response[:500],
+
+            # NEW: Conversation linking
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
             
@@ -717,14 +794,23 @@ class ResumeMatchingPlugin:
                     success=False,
                     error="No resumes found",
                 
-                # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
-                retry_count=0,
-                    prompt=f"Show matches for resume_id={resume_id}",
+                    # NEW: Error details
+                    error_type="NotFoundError",
+                    retry_count=0,
+                    
+                    # NEW: Conversation linking
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+                    
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
                     
-                    metadata={"resume_id": resume_id, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                    metadata={
+                        "resume_id": resume_id,
+                        "conversation_memory": self.memory,
+                        "execution_settings": self.exec_settings,
+                    }
                 )
                 return "❌ No resumes found. Please upload a resume first."
             resume_id = str(resume['id'])
@@ -742,14 +828,23 @@ class ResumeMatchingPlugin:
                     success=False,
                     error=f"Resume not found: {resume_id}",
                 
-                # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
-                retry_count=0,
-                    prompt=f"Show matches for resume_id={resume_id}",
+                    # NEW: Error details
+                    error_type="NotFoundError",
+                    retry_count=0,
+                    
+                    # NEW: Conversation linking
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+                    
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
                     
-                    metadata={"resume_id": resume_id, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                    metadata={
+                        "resume_id": resume_id,
+                        "conversation_memory": self.memory,
+                        "execution_settings": self.exec_settings,
+                    }
                 )
                 return f"❌ Resume with ID {resume_id} not found."
             resume_name = resume['name']
@@ -787,6 +882,12 @@ class ResumeMatchingPlugin:
                     success=True,
                     prompt=f"Show matches for resume_id={resume_id}",
                     response_text="No saved matches found",
+
+                    # NEW: Conversation linking
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
                     
@@ -840,6 +941,12 @@ class ResumeMatchingPlugin:
                 success=True,
                 prompt=f"Show matches for resume_id={resume_id}",
                 response_text=response[:500],
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -866,10 +973,16 @@ class ResumeMatchingPlugin:
                 success=False,
                 error=str(e),
                 
-                # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                # ERROR CLASSIFICATION
+                **classify_error(e, operation="show_saved_matches"),
                 retry_count=0,
                 prompt=f"Show matches for resume_id={resume_id}",
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -922,9 +1035,13 @@ class ResumeMatchingPlugin:
         resume_id = str(resume['id'])
         return await self.find_best_job_matches(resume_id=resume_id, top_n=top_n)
     
+    # =========================================================================
+    # _quick_score_job_match - WITH SEMANTIC CACHE
+    # =========================================================================
     async def _quick_score_job_match(self, resume_text: str, job: dict) -> dict:
         """
         Quick scoring method - provides a fast initial score for all jobs.
+        UPDATED: Now uses semantic cache for similar prompts.
         """
         # Build prompt with separate system and user components for tracking
         system_prompt = """You are an expert resume matcher. Score how well this resume matches the job.
@@ -987,14 +1104,38 @@ Description: {job.get('description', 'N/A')[:1500]}"""
             # Track this LLM call
             llm_start_time = time.time()
             
-            result = await self.kernel.invoke_prompt(prompt)
+            # ═══════════════════════════════════════════════════════════════
+            # CHECK SEMANTIC CACHE FIRST
+            # ═══════════════════════════════════════════════════════════════
+            cache_result = await semantic_cache.get(prompt, operation="quick_score_job")
             
-            latency_ms = (time.time() - llm_start_time) * 1000
-            result_str = str(result).strip()
-            
-            # Estimate tokens (rough approximation: 1 token ≈ 4 chars)
-            prompt_tokens = len(prompt) // 4
-            completion_tokens = len(result_str) // 4
+            if cache_result.hit:
+                # Cache HIT - use cached response
+                latency_ms = (time.time() - llm_start_time) * 1000
+                result_str = cache_result.response
+                prompt_tokens = 0  # No tokens used
+                completion_tokens = 0
+                cache_hit = True
+                cache_key = cache_result.cache_key
+                logger.info(f"   ✅ Cache HIT ({cache_result.similarity:.1%}) for job {job.get('id')}")
+            else:
+                # Cache MISS - call LLM
+                result = await self.kernel.invoke_prompt(prompt)
+                latency_ms = (time.time() - llm_start_time) * 1000
+                result_str = str(result).strip()
+                prompt_tokens = len(prompt) // 4
+                completion_tokens = len(result_str) // 4
+                cache_hit = False
+                
+                # Store in cache for next time
+                cache_key = await semantic_cache.set(
+                    prompt, 
+                    result_str, 
+                    operation="quick_score_job",
+                    metadata={"job_id": job.get('id'), "job_title": job.get('title')}
+                )
+                logger.debug(f"   💾 Cached quick_score for job {job.get('id')}")
+            # ═══════════════════════════════════════════════════════════════
             
             # Create prompt breakdown for Tier 2
             prompt_breakdown = create_prompt_breakdown(
@@ -1003,6 +1144,19 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 user_message=user_message,
                 user_message_tokens=len(user_message) // 4,
             ) if create_prompt_breakdown else None
+            
+            # Phase 4: LLM Judge evaluation - SKIP if cache hit (no new generation)
+            quality_eval = None
+            if not cache_hit:
+                quality_eval = await judge.maybe_evaluate(
+                    operation="quick_score_job",
+                    prompt=prompt[:5000],
+                    response=result_str[:5000],
+                    llm_client=self.kernel,
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+                )
             
             # Tier 3: Routing decision
             routing_decision = create_routing_decision(
@@ -1013,11 +1167,12 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 estimated_cost_savings=0.026
             ) if create_routing_decision else None
             
-            # Tier 3: Cache metadata
+            # Tier 3: Cache metadata - WITH REAL DATA
             cache_metadata = create_cache_metadata(
-                cache_hit=False,
-                cache_key=None,
-                cache_cluster_id="resume_job_matching"
+                cache_hit=cache_hit,
+                cache_key=cache_key,
+                cache_cluster_id="resume_job_matching",
+                similarity_score=cache_result.similarity if cache_hit else None,
             ) if create_cache_metadata else None
             
             # Track in Observatory - COMPLETE with all tiers
@@ -1040,6 +1195,9 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 prompt_metadata=QUICK_SCORE_META,
                 prompt_breakdown=prompt_breakdown,
                 
+                # Quality evaluation (Tier 2) - Phase 4 addition
+                quality_evaluation=quality_eval,
+                
                 # Optimization tracking (Tier 3)
                 routing_decision=routing_decision,
                 cache_metadata=cache_metadata,
@@ -1051,6 +1209,7 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Model configuration
                 temperature=0.3,  # Factual scoring
@@ -1067,12 +1226,15 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 metadata={
                     "job_id": job.get('id'),
                     "job_title": job.get('title', 'Unknown'),
+                    "cache_hit": cache_hit,
+                    "similarity": cache_result.similarity if cache_hit else None,
+                    "judged": quality_eval is not None,
                     "conversation_memory": self.memory,
                     "execution_settings": self.exec_settings
                 }
             )
             
-            logger.debug(f"Quick score LLM call: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            logger.debug(f"Quick score LLM call: {latency_ms:.0f}ms, cache_hit={cache_hit}")
             
             # Parse response (rest of the existing code stays the same)
             if '```json' in result_str:
@@ -1115,10 +1277,16 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 success=False,
                 error=str(e),
                 
-                # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                # ERROR CLASSIFICATION
+                **classify_error(e, operation="quick_score_job"),
                 retry_count=0,
                 prompt_metadata=QUICK_SCORE_META,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -1136,10 +1304,14 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 'reason': ["Error in scoring"]
             }
     
+    # =========================================================================
+    # _deep_analyze_job_match - WITH SEMANTIC CACHE
+    # =========================================================================
     async def _deep_analyze_job_match(self, resume_text: str, job: dict, original_score: int) -> dict:
         """
         Deep analysis method - provides line-by-line semantic matching with exact text highlights.
         This is SLOWER and only used for top matches.
+        UPDATED: Now uses semantic cache for similar prompts.
         """
         system_prompt = """You are an expert resume matcher. Perform semantic analysis to find connections between job requirements and resume content.
 
@@ -1233,14 +1405,38 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
             # Track this LLM call
             llm_start_time = time.time()
             
-            result = await self.kernel.invoke_prompt(prompt)
+            # ═══════════════════════════════════════════════════════════════
+            # CHECK SEMANTIC CACHE FIRST
+            # ═══════════════════════════════════════════════════════════════
+            cache_result = await semantic_cache.get(prompt, operation="deep_analyze_job")
             
-            latency_ms = (time.time() - llm_start_time) * 1000
-            result_str = str(result).strip()
-            
-            # Estimate tokens
-            prompt_tokens = len(prompt) // 4
-            completion_tokens = len(result_str) // 4
+            if cache_result.hit:
+                # Cache HIT - use cached response
+                latency_ms = (time.time() - llm_start_time) * 1000
+                result_str = cache_result.response
+                prompt_tokens = 0  # No tokens used
+                completion_tokens = 0
+                cache_hit = True
+                cache_key = cache_result.cache_key
+                logger.info(f"   ✅ Cache HIT ({cache_result.similarity:.1%}) for deep_analyze job {job.get('id')}")
+            else:
+                # Cache MISS - call LLM
+                result = await self.kernel.invoke_prompt(prompt)
+                latency_ms = (time.time() - llm_start_time) * 1000
+                result_str = str(result).strip()
+                prompt_tokens = len(prompt) // 4
+                completion_tokens = len(result_str) // 4
+                cache_hit = False
+                
+                # Store in cache for next time
+                cache_key = await semantic_cache.set(
+                    prompt, 
+                    result_str, 
+                    operation="deep_analyze_job",
+                    metadata={"job_id": job.get('id'), "job_title": job.get('title')}
+                )
+                logger.debug(f"   💾 Cached deep_analyze for job {job.get('id')}")
+            # ═══════════════════════════════════════════════════════════════
             
             # Create prompt breakdown for Tier 2
             prompt_breakdown = create_prompt_breakdown(
@@ -1250,13 +1446,17 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 user_message_tokens=len(user_message) // 4,
             ) if create_prompt_breakdown else None
             
-            # LLM Judge evaluation (50% sampling)
-            quality_eval = await judge.maybe_evaluate(
-                operation="deep_analyze_job",
-                prompt=prompt[:5000],
-                response=result_str[:5000],
-                llm_client=self.kernel, 
-            )
+            # LLM Judge evaluation - SKIP if cache hit (no new generation to judge)
+            quality_eval = None
+            if not cache_hit:
+                quality_eval = await judge.maybe_evaluate(
+                    operation="deep_analyze_job",
+                    prompt=prompt[:5000],
+                    response=result_str[:5000],
+                    llm_client=self.kernel, 
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None, 
+                )
             
             # Tier 3: Routing decision
             routing_decision = create_routing_decision(
@@ -1267,11 +1467,12 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 estimated_cost_savings=0.010
             ) if create_routing_decision else None
             
-            # Tier 3: Cache metadata
+            # Tier 3: Cache metadata - WITH REAL DATA
             cache_metadata = create_cache_metadata(
-                cache_hit=False,
-                cache_key=None,
-                cache_cluster_id="resume_job_deep_analysis"
+                cache_hit=cache_hit,
+                cache_key=cache_key,
+                cache_cluster_id="resume_job_deep_analysis",
+                similarity_score=cache_result.similarity if cache_hit else None,
             ) if create_cache_metadata else None
             
             # Track in Observatory - COMPLETE with all tiers (single call)
@@ -1294,7 +1495,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 prompt_metadata=DEEP_ANALYSIS_META,
                 prompt_breakdown=prompt_breakdown,
                 
-                # Quality evaluation (Tier 2)
+                # Quality evaluation (Tier 2) - None if cache hit
                 quality_evaluation=quality_eval,
                 
                 # Optimization tracking (Tier 3)
@@ -1308,6 +1509,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Model configuration
                 temperature=0.5,  # Balanced analysis
@@ -1325,13 +1527,15 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                     "job_id": job.get('id'),
                     "job_title": job.get('title', 'Unknown'),
                     "original_score": original_score,
+                    "cache_hit": cache_hit,
+                    "similarity": cache_result.similarity if cache_hit else None,
                     "judged": quality_eval is not None,
                     "conversation_memory": self.memory,
                     "execution_settings": self.exec_settings
                 }
             )
             
-            logger.debug(f"Deep analysis LLM call: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            logger.debug(f"Deep analysis LLM call: {latency_ms:.0f}ms, cache_hit={cache_hit}")
             
             # Parse response (rest of the existing code stays the same)
             if '```json' in result_str:
@@ -1383,14 +1587,24 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 success=False,
                 error=str(e),
                 
-                # NEW: Error details
-                error_type=type(e).__name__ if 'e' in locals() else "UNKNOWN",
+                # ERROR CLASSIFICATION
+                **classify_error(e, operation="deep_analyze_job"),
                 retry_count=0,
-                prompt_metadata=DEEP_ANALYSIS_META,
+                
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
-                metadata={"job_id": job.get('id'), "job_title": job.get('title', 'Unknown')}
+                metadata={
+                    "job_id": job.get('id'),
+                    "job_title": job.get('title', 'Unknown'),
+                    "conversation_memory": self.memory,
+                    "execution_settings": self.exec_settings,
+                }
             )
             
             return {

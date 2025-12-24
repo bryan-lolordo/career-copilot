@@ -27,6 +27,8 @@ from observatory_config import (
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
+    classify_error,
+    generate_cache_key,
 )
 
 # Configure logging
@@ -171,6 +173,8 @@ Required JSON format:
                 prompt=full_prompt,
                 response=result_str,
                 llm_client=self.kernel, 
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None, 
             )
             # Tier 3: Routing decision (placeholder - ready for optimization)
             routing_decision = create_routing_decision(
@@ -183,7 +187,7 @@ Required JSON format:
             # Tier 3: Cache metadata (placeholder - ready for optimization)
             cache_metadata = create_cache_metadata(
                 cache_hit=False,
-                cache_key=None,
+                cache_key=generate_cache_key("improve_bullet", user_request, job_title),  
                 cache_cluster_id="resume_tailoring"
             ) if create_cache_metadata else None
             
@@ -219,6 +223,7 @@ Required JSON format:
                 # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
 
                 # NEW: Model configuration
                 temperature=0.7,  # Creative writing for resume improvement
@@ -288,6 +293,12 @@ Required JSON format:
                 success=False,
                 error=f"JSON parsing error: {str(e)}",
                 prompt_metadata=IMPROVE_BULLET_META,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -314,7 +325,17 @@ Required JSON format:
                 success=False,
                 error=str(e),
                 prompt_metadata=IMPROVE_BULLET_META,
-                # NEW: Observability
+
+                # ERROR CLASSIFICATION
+                **classify_error(e, operation="improve_bullet"),
+                retry_count=0,
+
+                # Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
+                # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
                 metadata={"job_title": job_title, "company": company, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
@@ -401,6 +422,12 @@ Copy each improved bullet below and paste into your resume:
                 quality_evaluation=None,
                 prompt_variant_id=None,
                 test_dataset_id=None,
+
+                # NEW: Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -428,11 +455,20 @@ Copy each improved bullet below and paste into your resume:
                 operation="generate_change_report",
                 success=False,
                 error=str(e),
-                # NEW: Observability
+
+                # ERROR CLASSIFICATION
+                **classify_error(e, operation="generate_change_report"),
+                retry_count=0,
+
+                # Conversation linking
+                conversation_id=self.memory.conversation_id if self.memory else None,
+                turn_number=self.memory.turn_number if self.memory else None,
+                parent_call_id=self.memory.request_id if self.memory else None,
+                
+                # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
                 metadata={"resume_name": resume_name, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
-                
             )
             return f"Error generating report: {str(e)}"
 

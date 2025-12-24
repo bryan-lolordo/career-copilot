@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import time
+import uuid
 
 from agents.semantic_kernel_setup import (
     create_kernel_with_plugins,
@@ -103,9 +104,12 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
     """
     logger.info(f"Processing Streamlit message: '{message[:50]}...'")
     
-    # ADD THESE THREE LINES:
+    # Track conversation turn and generate request_id for call chain linking
     memory.turn_number += 1
     memory.conversation_id = obs_session.id
+    memory.request_id = str(uuid.uuid4())  # Unique ID for all calls from this user message
+    
+    logger.debug(f"Request {memory.request_id[:8]}... - Turn {memory.turn_number}")
 
     start_time = time.time()
 
@@ -209,7 +213,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             conversation_id=obs_session.id if hasattr(obs_session, 'id') else "streamlit_session",
             turn_number=len(history.messages),
             user_id=None,  # Could be added if user authentication exists
-            parent_call_id=None,
+            parent_call_id=memory.request_id,  # Groups all calls from this user message
             
             # NEW: Model configuration (from execution_settings)
             temperature=0.7,
@@ -234,7 +238,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             
             # NEW: Observability
             trace_id=obs_session.id if hasattr(obs_session, 'id') else None,
-            request_id=None,
+            request_id=memory.request_id,  # Links to parent_call_id for tracing
             environment=os.getenv("ENVIRONMENT", "development"),
             
             # Additional metadata
@@ -298,7 +302,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             conversation_id=obs_session.id if hasattr(obs_session, 'id') else "streamlit_session",
             turn_number=len(history.messages),
             user_id=None,
-            parent_call_id=None,
+            parent_call_id=memory.request_id,  # Groups all calls from this user message
             
             # NEW: Model configuration
             temperature=0.7,
@@ -312,7 +316,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             
             # NEW: Observability
             trace_id=obs_session.id if hasattr(obs_session, 'id') else None,
-            request_id=None,
+            request_id=memory.request_id,  # Same as parent_call_id for consistency
             environment=os.getenv("ENVIRONMENT", "development"),
             
             metadata={
@@ -388,10 +392,15 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
             system_prompt = content
             system_tokens = tokens
         elif role == "user":
-            # Keep last user message
+            # Add previous user message to history before overwriting
+            if user_message is not None:
+                chat_history.append({"role": "user", "content": user_message})
+                chat_history_tokens += user_tokens
+            # Keep last user message (current turn)
             user_message = content
             user_tokens = tokens
         else:
+            # Assistant and other messages go to history
             chat_history.append(msg)
             chat_history_tokens += tokens
     
@@ -402,6 +411,7 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
         user_message_tokens=user_tokens,
         chat_history=chat_history if chat_history else None,
         chat_history_tokens=chat_history_tokens if chat_history else None,
+        chat_history_count=len(chat_history) if chat_history else None,
     )
 
 
