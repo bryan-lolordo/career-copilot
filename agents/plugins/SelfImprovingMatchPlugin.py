@@ -125,15 +125,15 @@ class SelfImprovingMatchPlugin:
             resume = db_service.get_resume_by_id(int(resume_id))
         except ValueError:
             # resume_id is a name, look it up
-            resumes = db_service.get_all_resumes()
+            resumes = db_service.list_all_resumes()
             resume = next((r for r in resumes if r.get('name') == resume_id), None)
 
         try:
             job = db_service.get_job_by_id(int(job_id))
         except ValueError:
             # job_id is a title, look it up
-            jobs = db_service.search_jobs(job_id, limit=1)
-            job = jobs[0] if jobs else None
+            jobs = db_service.get_all_jobs()
+            job = next((j for j in jobs if job_id.lower() in j.get('title', '').lower()), None)
         
         if not resume or not job:
             return json.dumps({'error': 'Resume or job not found'})

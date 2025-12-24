@@ -175,6 +175,7 @@ Required JSON format:
                 llm_client=self.kernel, 
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None, 
+                parent_call_id=self.memory.request_id if self.memory else None,
             )
             # Tier 3: Routing decision (placeholder - ready for optimization)
             routing_decision = create_routing_decision(

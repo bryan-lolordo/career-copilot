@@ -139,11 +139,13 @@ judge = LLMJudge(
         "critique_match",
         "streamlit_chat",
         "cli_chat_message",
+        "generate_sql",
+        "explain_recent_match",  
+        "refine_analysis", 
     },
     
     # Operations to skip (low-value or simple)
     skip_operations={
-        "generate_sql",
         "job_search",
         "save_jobs",
         "list_resumes",

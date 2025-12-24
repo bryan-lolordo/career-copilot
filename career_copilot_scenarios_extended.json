@@ -400,5 +400,119 @@
         "assertions": ["creates strength bullets"]
       }
     ]
+  },
+  {
+    "scenario_id": "fresh_resume_matching",
+    "description": "Match resume against multiple new jobs",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "find me ai consultant jobs in new york",
+        "expected_tools": ["JobPlugin.find_jobs"],
+        "assertions": ["returns jobs"]
+      },
+      {
+        "turn": 2,
+        "user": "save jobs 1, 2, 3, 4, 5",
+        "expected_tools": ["JobPlugin.save_searched_jobs"],
+        "assertions": ["saves 5 jobs"]
+      },
+      {
+        "turn": 3,
+        "user": "match my AI Engineer Resume against these new jobs",
+        "expected_tools": ["ResumeMatching.select_job_filter_for_matching"],
+        "assertions": ["runs deep analysis"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "self_improve_multiple",
+    "description": "Self-improve multiple matches",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me my matches with scores between 70 and 90",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns matches in range"]
+      },
+      {
+        "turn": 2,
+        "user": "improve the analysis for the first match",
+        "expected_tools": ["SelfImprovingMatch.self_improve_single_match"],
+        "assertions": ["runs self-improvement"]
+      },
+      {
+        "turn": 3,
+        "user": "now improve the second one",
+        "expected_tools": ["SelfImprovingMatch.self_improve_single_match"],
+        "assertions": ["runs self-improvement"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "cache_hit_test",
+    "description": "Repeated queries to test caching",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "how many jobs do I have saved",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns count"]
+      },
+      {
+        "turn": 2,
+        "user": "remind me how many jobs I saved",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["cache hit expected"]
+      },
+      {
+        "turn": 3,
+        "user": "show my top matches",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns matches"]
+      },
+      {
+        "turn": 4,
+        "user": "show me my best matches again",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["cache hit expected"]
+      }
+    ]
+  },
+  {
+    "scenario_id": "resume_tailoring_intensive",
+    "description": "Multiple tailoring requests for different job aspects",
+    "conversation": [
+      {
+        "turn": 1,
+        "user": "show me my top 3 matches",
+        "expected_tools": ["DatabaseQueryPlugin.query_database_with_ai"],
+        "assertions": ["returns top 3"]
+      },
+      {
+        "turn": 2,
+        "user": "help me write a bullet highlighting my AI engineering skills for the first job",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["generates bullet"]
+      },
+      {
+        "turn": 3,
+        "user": "now create one for the second job focusing on consulting experience",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["generates bullet"]
+      },
+      {
+        "turn": 4,
+        "user": "write a bullet for the third job emphasizing my project delivery",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["generates bullet"]
+      },
+      {
+        "turn": 5,
+        "user": "give me one more for the first job about cross-functional collaboration",
+        "expected_tools": ["ResumeTailoring.improve_resume_bullet"],
+        "assertions": ["generates bullet"]
+      }
+    ]
   }
 ]

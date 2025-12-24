@@ -1155,7 +1155,7 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                     llm_client=self.kernel,
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+                    parent_call_id=self.memory.request_id if self.memory else None,
                 )
             
             # Tier 3: Routing decision
@@ -1456,6 +1456,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                     llm_client=self.kernel, 
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None, 
+                    parent_call_id=self.memory.request_id if self.memory else None,
                 )
             
             # Tier 3: Routing decision
