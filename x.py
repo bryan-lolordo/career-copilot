@@ -26,14 +26,8 @@ import time
 import uuid
 import os
 import sys
-import io
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-
-# Fix Windows console encoding for emojis
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # =============================================================================
 # VISUAL HELPERS
@@ -230,7 +224,6 @@ class ScenarioRunner:
             create_chat_history_with_system_prompt,
             create_execution_settings,
             SYSTEM_PROMPT,
-            SYSTEM_PROMPT_VERSION,
         )
         
         # Create fresh kernel and memory for this scenario
@@ -352,14 +345,13 @@ class ScenarioRunner:
         - content_hash and prompt_normalized (auto by SDK)
         """
         from observatory_config import (
-            track_llm_call,
+            track_llm_call, 
             estimate_tokens,
             classify_error,
             calculate_complexity_score,
             create_routing_decision,
             DEFAULT_MODEL,
         )
-        from agents.semantic_kernel_setup import SYSTEM_PROMPT_VERSION
         
         # ⭐ Generate request_id for this turn (matches chatbot.py)
         # This becomes parent_call_id for all plugin calls in this turn
@@ -383,8 +375,7 @@ class ScenarioRunner:
         success = True
         error_info = None
         assistant_message = ""
-        response = None  # Initialize to None so it's always defined
-
+        
         try:
             # Get response from chat completion
             response = await chat_completion.get_chat_message_content(
@@ -393,25 +384,25 @@ class ScenarioRunner:
                 kernel=kernel,
             )
             assistant_message = str(response)
-
+            
         except Exception as e:
             success = False
             error_info = classify_error(e, operation="scenario_chat")
             assistant_message = f"Error: {str(e)}"
             raise  # Re-raise after tracking
-
+        
         finally:
             latency_ms = (time.time() - start_time) * 1000
-
+            
             # Add assistant response to history
             history.add_assistant_message(assistant_message)
             memory.chat_history = history
-
+            
             # ⭐ Extract token usage if available
             prompt_tokens = 0
             completion_tokens = 0
-
-            if success and response and hasattr(response, 'metadata') and response.metadata:
+            
+            if success and hasattr(response, 'metadata') and response.metadata:
                 usage = response.metadata.get('usage')
                 if usage:
                     # Handle both dict and CompletionUsage object
@@ -436,9 +427,9 @@ class ScenarioRunner:
             
             # ⭐ Track main orchestration call (like chatbot.py does)
             track_kwargs = {
-                "operation": "chat",  # Generic - works for all chat interfaces
-                "agent_name": "ChatAgent",  # Matches your chatbot.py line 219
-                "agent_role": "orchestrator",  # Matches your chatbot.py
+                "operation": "scenario_chat",
+                "agent_name": "ScenarioRunner",
+                "agent_role": "orchestrator",
                 "prompt": user_input,
                 "response_text": assistant_message if success else None,
                 "system_prompt": str(system_prompt)[:1000],
@@ -447,39 +438,31 @@ class ScenarioRunner:
                 "completion_tokens": completion_tokens,
                 "latency_ms": latency_ms,
                 "success": success,
-                
-                # Conversation linking - MATCHES CHATBOT.PY
-                "conversation_id": memory.conversation_id,  # Uses session.id
-                "turn_number": memory.turn_number,  # Incremented per turn
-                "parent_call_id": None,  # Root of call tree (matches chatbot.py line 267)
-                "request_id": request_id,  # For plugin calls to reference (matches chatbot.py line 273)
+
+                # Conversation linking
+                "conversation_id": memory.conversation_id,
+                "turn_number": memory.turn_number,
+                "parent_call_id": None,  # Orchestrator is root of call tree
+                "request_id": request_id,
                 
                 # Prompt breakdown (includes chat_history)
                 "prompt_breakdown": prompt_breakdown,
-                
+
                 # Routing decision with complexity
                 "routing_decision": create_routing_decision(
                     chosen_model=DEFAULT_MODEL,
                     alternative_models=["gpt-4o", "gpt-4o-mini"],
-                    reasoning="Chat interaction - using default model",  # Matches chatbot.py line 234
+                    reasoning="Scenario test - using default model",
                     complexity_score=calculate_complexity_score(user_input, tool_call_count=0)
                 ),
-                
-                # Streaming - MATCHES CHATBOT.PY line 287
+                # Streaming
                 "time_to_first_token_ms": None,
-                
-                # Observability - MATCHES CHATBOT.PY lines 289-291
-                "trace_id": memory.conversation_id,  # Use conversation_id as trace
-                "request_id": request_id,
-                "environment": os.getenv("ENVIRONMENT", "development"),
-                
-                # Test metadata - THIS distinguishes test from production
+                # Test metadata
                 "metadata": {
                     "scenario_id": memory.context.test_metadata.get("scenario_id"),
                     "expected_tools": memory.context.test_metadata.get("expected_tools"),
-                    "is_test": True,  # Only difference from production
+                    "is_test": True,
                     "test_dataset_id": f"scenario_{memory.context.test_metadata.get('scenario_id')}",
-                    "system_prompt_version": SYSTEM_PROMPT_VERSION,  # Track like chatbot.py
                 },
             }
             

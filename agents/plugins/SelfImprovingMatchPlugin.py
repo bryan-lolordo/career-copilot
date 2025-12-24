@@ -123,21 +123,37 @@ class SelfImprovingMatchPlugin:
         
         # Handle both IDs and names
         try:
-            resume = db_service.get_resume_by_id(int(resume_id))
+            resume_id_int = int(resume_id)
+            resume = db_service.get_resume_by_id(resume_id_int)
         except ValueError:
-            # resume_id is a name, look it up
             resumes = db_service.list_all_resumes()
-            resume = next((r for r in resumes if r.get('name') == resume_id), None)
+            resume_match = next((r for r in resumes if r.get('name') == resume_id), None)
+            if resume_match:
+                resume_id_int = resume_match['id']
+                resume = db_service.get_resume_by_id(resume_id_int)
+            else:
+                resume_id_int = None
+                resume = None
 
         try:
-            job = db_service.get_job_by_id(int(job_id))
+            job_id_int = int(job_id)
+            job = db_service.get_job_by_id(job_id_int)
         except ValueError:
-            # job_id is a title, look it up
             jobs = db_service.get_all_jobs()
-            job = next((j for j in jobs if job_id.lower() in j.get('title', '').lower()), None)
+            job_match = next((j for j in jobs if job_id.lower() in j.get('title', '').lower()), None)
+            if job_match:
+                job_id_int = job_match['id']
+                job = db_service.get_job_by_id(job_id_int)
+            else:
+                job_id_int = None
+                job = None
         
-        if not resume or not job:
-            return json.dumps({'error': 'Resume or job not found'})
+        if not resume or not job or resume_id_int is None or job_id_int is None:
+            return json.dumps({
+                'error': 'Resume or job not found',
+                'resume_id': resume_id,
+                'job_id': job_id
+            })
         
         iteration = 0
         refinement_log = []
@@ -161,7 +177,7 @@ class SelfImprovingMatchPlugin:
                 guidance_text = ""
             
             analysis = await self._deep_analyze_with_guidance(
-                resume_text=resume['content'],
+                resume_text=resume['text'],
                 job=job,
                 guidance=guidance_text,
                 previous_analysis=current_analysis if iteration > 1 else None
@@ -277,8 +293,8 @@ class SelfImprovingMatchPlugin:
             }
             
             db_service.save_match(
-                resume_id=int(resume_id),
-                job_id=int(job_id),
+                resume_id=resume_id_int,  # ← Use the integer we extracted earlier
+                job_id=job_id_int,
                 score=best_analysis['score'],
                 reason=best_analysis.get('reason', 'Improved analysis'),
                 confidence=best_analysis.get('confidence', 0.85),

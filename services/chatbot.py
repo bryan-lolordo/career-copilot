@@ -388,21 +388,40 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
     chat_history = []
     chat_history_tokens = 0
     
+    # First pass: find system prompt
+    for msg in messages:
+        if msg.get("role", "").lower() == "system":
+            system_prompt = msg.get("content", "")
+            system_tokens = len(system_prompt) // 4
+            break
+    
+    # Second pass: process user/assistant messages
+    # Last user message = current, everything else = history
+    user_messages = []
+    assistant_messages = []
+    
     for msg in messages:
         role = msg.get("role", "").lower()
-        content = msg.get("content", "")
-        tokens = len(content) // 4
+        if role == "user":
+            user_messages.append(msg)
+        elif role == "assistant":
+            assistant_messages.append(msg)
+    
+    # Last user message is the current one
+    if user_messages:
+        last_user = user_messages[-1]
+        user_message = last_user.get("content", "")
+        user_tokens = len(user_message) // 4
         
-        if role == "system":
-            system_prompt = content
-            system_tokens = tokens
-        elif role == "user":
-            # Keep last user message
-            user_message = content
-            user_tokens = tokens
-        else:
+        # All PREVIOUS user messages go into history
+        for msg in user_messages[:-1]:
             chat_history.append(msg)
-            chat_history_tokens += tokens
+            chat_history_tokens += len(msg.get("content", "")) // 4
+    
+    # ALL assistant messages go into history
+    for msg in assistant_messages:
+        chat_history.append(msg)
+        chat_history_tokens += len(msg.get("content", "")) // 4
     
     return create_prompt_breakdown(
         system_prompt=system_prompt,

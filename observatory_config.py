@@ -604,8 +604,7 @@ def extract_token_breakdown_from_messages(
     chat_history: Any = None,
     conversation_memory: Any = None,
 ) -> Dict[str, int]:
-    """
-    Extract token breakdown from various message formats.
+    """Extract token breakdown from various message formats.
     
     Auto-populates system_prompt_tokens, user_message_tokens, chat_history_tokens,
     and conversation_context_tokens for comprehensive token tracking.
@@ -618,8 +617,8 @@ def extract_token_breakdown_from_messages(
         conversation_memory: ConversationMemory object
         
     Returns:
-        Dict with all token breakdown fields
-    """
+        Dict with all token breakdown fields"""
+    
     breakdown = {
         'system_prompt_tokens': 0,
         'user_message_tokens': 0,
@@ -629,6 +628,8 @@ def extract_token_breakdown_from_messages(
     
     # Method 1: Extract from messages array (OpenAI/Azure format)
     if messages:
+        user_messages = []
+        
         for msg in messages:
             role = msg.get('role', '')
             content = msg.get('content', '')
@@ -637,8 +638,17 @@ def extract_token_breakdown_from_messages(
             if role == 'system':
                 breakdown['system_prompt_tokens'] += tokens
             elif role == 'user':
-                breakdown['user_message_tokens'] += tokens
+                user_messages.append((content, tokens))  # Store all user messages
             elif role in ['assistant', 'function']:
+                breakdown['chat_history_tokens'] += tokens
+        
+        # Last user message is current, rest go to history
+        if user_messages:
+            # Current user message (last one)
+            breakdown['user_message_tokens'] = user_messages[-1][1]
+            
+            # Previous user messages go to history
+            for content, tokens in user_messages[:-1]:
                 breakdown['chat_history_tokens'] += tokens
     
     # Method 2: Extract from individual strings

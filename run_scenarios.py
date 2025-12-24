@@ -26,8 +26,38 @@ import time
 import uuid
 import os
 import sys
+import io
+import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+
+# Fix Windows console encoding for emojis
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+# Quiet noisy loggers
+logging.getLogger('semantic_kernel').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('openai').setLevel(logging.WARNING)
+
+# Keep plugin activity visible
+logging.getLogger('agents.plugins').setLevel(logging.INFO)
+logging.getLogger('ResumeMatchingPlugin').setLevel(logging.INFO)
+logging.getLogger('JobPlugin').setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # VISUAL HELPERS
@@ -224,6 +254,7 @@ class ScenarioRunner:
             create_chat_history_with_system_prompt,
             create_execution_settings,
             SYSTEM_PROMPT,
+            SYSTEM_PROMPT_VERSION,
         )
         
         # Create fresh kernel and memory for this scenario
@@ -270,6 +301,7 @@ class ScenarioRunner:
                 expected_tools = turn.get("expected_tools", [])
                 
                 print_turn(turn_num, user_input, expected_tools)
+                logger.info(f"🚀 Starting turn {turn_num}: '{user_input[:60]}...'")
                 
                 # Set turn number BEFORE executing the turn
                 memory.turn_number = turn_num
@@ -299,9 +331,11 @@ class ScenarioRunner:
                     
                     latency_ms = (time.time() - turn_start) * 1000
                     print_response(response, latency_ms)
+                    logger.info(f"✅ Turn {turn_num} completed ({latency_ms:.0f}ms)")
                     result["turns_completed"] += 1
                     
                 except Exception as e:
+                    logger.error(f"❌ Turn {turn_num} failed: {type(e).__name__}: {str(e)[:100]}")
                     print_error(f"Turn {turn_num} failed: {e}")
                     result["error"] = str(e)
                     result["success"] = False
@@ -345,18 +379,21 @@ class ScenarioRunner:
         - content_hash and prompt_normalized (auto by SDK)
         """
         from observatory_config import (
-            track_llm_call, 
+            track_llm_call,
             estimate_tokens,
             classify_error,
             calculate_complexity_score,
             create_routing_decision,
             DEFAULT_MODEL,
         )
+        from agents.semantic_kernel_setup import SYSTEM_PROMPT_VERSION
         
         # ⭐ Generate request_id for this turn (matches chatbot.py)
         # This becomes parent_call_id for all plugin calls in this turn
         request_id = str(uuid.uuid4())
         memory.request_id = request_id
+        
+        logger.debug(f"📤 Request ID: {request_id[:8]}...")
         
         # Add user message to history
         history.add_user_message(user_input)
@@ -371,12 +408,16 @@ class ScenarioRunner:
                 "content": str(msg.content)[:2000]  # Truncate for storage
             })
         
+        logger.debug(f"📚 Chat history: {len(history.messages)} messages")
+        
         start_time = time.time()
         success = True
         error_info = None
         assistant_message = ""
-        
+        response = None  # Initialize to None so it's always defined
+
         try:
+            logger.info(f"🤖 Sending request to LLM...")
             # Get response from chat completion
             response = await chat_completion.get_chat_message_content(
                 chat_history=history,
@@ -384,25 +425,27 @@ class ScenarioRunner:
                 kernel=kernel,
             )
             assistant_message = str(response)
-            
+            logger.info(f"📥 LLM responded")
+
         except Exception as e:
             success = False
             error_info = classify_error(e, operation="scenario_chat")
             assistant_message = f"Error: {str(e)}"
+            logger.error(f"💥 LLM error: {type(e).__name__}: {str(e)[:100]}")
             raise  # Re-raise after tracking
-        
+
         finally:
             latency_ms = (time.time() - start_time) * 1000
-            
+
             # Add assistant response to history
             history.add_assistant_message(assistant_message)
             memory.chat_history = history
-            
+
             # ⭐ Extract token usage if available
             prompt_tokens = 0
             completion_tokens = 0
-            
-            if success and hasattr(response, 'metadata') and response.metadata:
+
+            if success and response and hasattr(response, 'metadata') and response.metadata:
                 usage = response.metadata.get('usage')
                 if usage:
                     # Handle both dict and CompletionUsage object
@@ -422,14 +465,16 @@ class ScenarioRunner:
             if not completion_tokens:
                 completion_tokens = estimate_tokens(assistant_message)
             
+            logger.debug(f"🎯 Tokens: {prompt_tokens} prompt + {completion_tokens} completion")
+            
             # ⭐ Create prompt breakdown with chat history
             prompt_breakdown = create_prompt_breakdown_from_messages(messages_for_breakdown)
             
             # ⭐ Track main orchestration call (like chatbot.py does)
             track_kwargs = {
-                "operation": "scenario_chat",
-                "agent_name": "ScenarioRunner",
-                "agent_role": "orchestrator",
+                "operation": "chat",  # Generic - works for all chat interfaces
+                "agent_name": "ChatAgent",  # Matches your chatbot.py line 219
+                "agent_role": "orchestrator",  # Matches your chatbot.py
                 "prompt": user_input,
                 "response_text": assistant_message if success else None,
                 "system_prompt": str(system_prompt)[:1000],
@@ -438,28 +483,39 @@ class ScenarioRunner:
                 "completion_tokens": completion_tokens,
                 "latency_ms": latency_ms,
                 "success": success,
-                # Conversation linking
-                "conversation_id": memory.conversation_id,
-                "turn_number": memory.turn_number,
-                "parent_call_id": None,  # Orchestrator is root of call tree
-                "request_id": request_id,
+                
+                # Conversation linking - MATCHES CHATBOT.PY
+                "conversation_id": memory.conversation_id,  # Uses session.id
+                "turn_number": memory.turn_number,  # Incremented per turn
+                "parent_call_id": None,  # Root of call tree (matches chatbot.py line 267)
+                "request_id": request_id,  # For plugin calls to reference (matches chatbot.py line 273)
+                
                 # Prompt breakdown (includes chat_history)
                 "prompt_breakdown": prompt_breakdown,
+                
                 # Routing decision with complexity
                 "routing_decision": create_routing_decision(
                     chosen_model=DEFAULT_MODEL,
                     alternative_models=["gpt-4o", "gpt-4o-mini"],
-                    reasoning="Scenario test - using default model",
+                    reasoning="Chat interaction - using default model",  # Matches chatbot.py line 234
                     complexity_score=calculate_complexity_score(user_input, tool_call_count=0)
                 ),
-                # Streaming
+                
+                # Streaming - MATCHES CHATBOT.PY line 287
                 "time_to_first_token_ms": None,
-                # Test metadata
+                
+                # Observability - MATCHES CHATBOT.PY lines 289-291
+                "trace_id": memory.conversation_id,  # Use conversation_id as trace
+                "request_id": request_id,
+                "environment": os.getenv("ENVIRONMENT", "development"),
+                
+                # Test metadata - THIS distinguishes test from production
                 "metadata": {
                     "scenario_id": memory.context.test_metadata.get("scenario_id"),
                     "expected_tools": memory.context.test_metadata.get("expected_tools"),
-                    "is_test": True,
+                    "is_test": True,  # Only difference from production
                     "test_dataset_id": f"scenario_{memory.context.test_metadata.get('scenario_id')}",
+                    "system_prompt_version": SYSTEM_PROMPT_VERSION,  # Track like chatbot.py
                 },
             }
             
@@ -470,6 +526,7 @@ class ScenarioRunner:
                 track_kwargs["error_code"] = error_info.get("error_code")
             
             track_llm_call(**track_kwargs)
+            logger.debug(f"💾 Tracked LLM call to Observatory")
         
         return assistant_message
     
@@ -529,8 +586,18 @@ async def main():
         default="career_copilot_scenarios.json",
         help="Path to scenarios JSON file"
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable DEBUG level logging"
+    )
     
     args = parser.parse_args()
+    
+    # Enable verbose logging if requested
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
     
     runner = ScenarioRunner(scenario_file=args.file)
     
