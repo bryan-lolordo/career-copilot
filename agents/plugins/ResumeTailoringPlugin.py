@@ -29,6 +29,7 @@ from observatory_config import (
     ErrorDetails,
     classify_error,
     generate_cache_key,
+    calculate_prefix_hash,
 )
 
 # Configure logging
@@ -167,7 +168,7 @@ Required JSON format:
                 user_message_tokens=len(user_message) // 4,
             ) if create_prompt_breakdown else None
             
-            # LLM Judge evaluation (50% sampling) - get this BEFORE tracking
+            # LLM Judge evaluation 
             quality_eval = await judge.maybe_evaluate(
                 operation="improve_bullet",  
                 prompt=full_prompt,
@@ -175,7 +176,6 @@ Required JSON format:
                 llm_client=self.kernel, 
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None, 
-                parent_call_id=self.memory.request_id if self.memory else None,
             )
             # Tier 3: Routing decision (placeholder - ready for optimization)
             routing_decision = create_routing_decision(
@@ -225,6 +225,7 @@ Required JSON format:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
                 # NEW: Model configuration
                 temperature=0.7,  # Creative writing for resume improvement
@@ -233,6 +234,12 @@ Required JSON format:
                 # NEW: Token breakdown (top-level)
                 system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
                 user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
+                # NEW: Prefix hash
+                prompt_prefix_hash=calculate_prefix_hash(system_prompt),
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -299,7 +306,11 @@ Required JSON format:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                equest_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -335,6 +346,7 @@ Required JSON format:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
                 # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -428,7 +440,11 @@ Copy each improved bullet below and paste into your resume:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -465,6 +481,7 @@ Copy each improved bullet below and paste into your resume:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
                 
                 # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),

@@ -44,6 +44,7 @@ from observatory_config import (
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
+    calculate_complexity_score,
 )
 
 # Configure logging
@@ -104,12 +105,10 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
     """
     logger.info(f"Processing Streamlit message: '{message[:50]}...'")
     
-    # Track conversation turn and generate request_id for call chain linking
+    # ADD THESE THREE LINES:
     memory.turn_number += 1
     memory.conversation_id = obs_session.id
-    memory.request_id = str(uuid.uuid4())  # Unique ID for all calls from this user message
-    
-    logger.debug(f"Request {memory.request_id[:8]}... - Turn {memory.turn_number}")
+    memory.request_id = str(uuid.uuid4())
 
     start_time = time.time()
 
@@ -168,10 +167,10 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         
         # Tier 3: Routing decision (placeholder - ready for optimization)
         routing_decision = create_routing_decision(
-            chosen_model=DEFAULT_MODEL,  # Will be filled by observatory_config from env
+            chosen_model=DEFAULT_MODEL,
             alternative_models=["gpt-4o", "gpt-4o-mini"],
             reasoning="Chat interaction - using default model",
-            complexity_score=0.5
+            complexity_score=calculate_complexity_score(message, tool_call_count=len(plugin_used.split(',')) if plugin_used else 0)
         ) if create_routing_decision else None
         
         # Tier 3: Cache metadata (placeholder - ready for optimization)
@@ -213,7 +212,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             conversation_id=obs_session.id if hasattr(obs_session, 'id') else "streamlit_session",
             turn_number=len(history.messages),
             user_id=None,  # Could be added if user authentication exists
-            parent_call_id=memory.request_id,  # Groups all calls from this user message
+            parent_call_id=None,  # Orchestrator is root of call tree
             
             # NEW: Model configuration (from execution_settings)
             temperature=0.7,
@@ -235,10 +234,13 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             tool_calls_made=tool_calls if tool_calls else None,
             tool_call_count=tool_count,
             tool_execution_time_ms=None,
+
+            # NEW: Streaming (None = not streaming, enables recommendation detection)
+            time_to_first_token_ms=None,
             
             # NEW: Observability
             trace_id=obs_session.id if hasattr(obs_session, 'id') else None,
-            request_id=memory.request_id,  # Links to parent_call_id for tracing
+            request_id=memory.request_id,  # Plugins use this as parent_call_id
             environment=os.getenv("ENVIRONMENT", "development"),
             
             # Additional metadata
@@ -302,7 +304,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             conversation_id=obs_session.id if hasattr(obs_session, 'id') else "streamlit_session",
             turn_number=len(history.messages),
             user_id=None,
-            parent_call_id=memory.request_id,  # Groups all calls from this user message
+            parent_call_id=None,  # Orchestrator is root of call tree
             
             # NEW: Model configuration
             temperature=0.7,
@@ -313,10 +315,13 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             error_type=type(e).__name__,
             error_code=None,
             retry_count=0,
+
+            # NEW: Streaming (None = not streaming, enables recommendation detection)
+            time_to_first_token_ms=None,
             
             # NEW: Observability
             trace_id=obs_session.id if hasattr(obs_session, 'id') else None,
-            request_id=memory.request_id,  # Same as parent_call_id for consistency
+            request_id=memory.request_id,  # Plugins use this as parent_call_id
             environment=os.getenv("ENVIRONMENT", "development"),
             
             metadata={
@@ -392,15 +397,10 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
             system_prompt = content
             system_tokens = tokens
         elif role == "user":
-            # Add previous user message to history before overwriting
-            if user_message is not None:
-                chat_history.append({"role": "user", "content": user_message})
-                chat_history_tokens += user_tokens
-            # Keep last user message (current turn)
+            # Keep last user message
             user_message = content
             user_tokens = tokens
         else:
-            # Assistant and other messages go to history
             chat_history.append(msg)
             chat_history_tokens += tokens
     
@@ -411,7 +411,6 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
         user_message_tokens=user_tokens,
         chat_history=chat_history if chat_history else None,
         chat_history_tokens=chat_history_tokens if chat_history else None,
-        chat_history_count=len(chat_history) if chat_history else None,
     )
 
 

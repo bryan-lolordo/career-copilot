@@ -501,6 +501,98 @@ def generate_cache_key(operation: str, *key_parts) -> str:
     return hashlib.md5(combined.encode()).hexdigest()[:16]
 
 
+def calculate_complexity_score(user_message: str, tool_call_count: int = 0) -> float:
+    """
+    Calculate query complexity score (0.0 - 1.0) for model routing decisions.
+    
+    Higher scores indicate more complex queries that may benefit from 
+    premium models. Lower scores suggest simpler queries suitable for 
+    cheaper models.
+    
+    Used by:
+    - Model routing: Route simple queries to gpt-4o-mini, complex to gpt-4o
+    - Cost optimization: Identify over-provisioned calls
+    - Dashboard Story 3: Routing analysis
+    
+    Usage:
+        complexity = calculate_complexity_score(user_message, tool_count=2)
+        routing_decision = create_routing_decision(
+            chosen_model="gpt-4o-mini",
+            complexity_score=complexity,
+            ...
+        )
+    
+    Args:
+        user_message: The user's input message
+        tool_count: Number of tools/functions called (higher = more complex)
+    
+    Returns:
+        Float between 0.0 (simple) and 1.0 (complex)
+    """
+    if not user_message:
+        return 0.0
+    
+    score = 0.0
+    message_lower = user_message.lower()
+    
+    # Length factor (longer messages tend to be more complex)
+    score += min(0.3, len(user_message) / 1000)
+    
+    # Simple patterns reduce complexity
+    simple_patterns = ['what is', 'who is', 'when', 'where', 'how many', 'list', 'show me', 'find']
+    if any(p in message_lower for p in simple_patterns):
+        score -= 0.1
+    
+    # Complex patterns increase complexity
+    complex_patterns = ['analyze', 'compare', 'evaluate', 'explain why', 'recommend', 
+                        'improve', 'critique', 'summarize', 'synthesize', 'create']
+    if any(p in message_lower for p in complex_patterns):
+        score += 0.2
+    
+    # Multi-step requests are more complex
+    multi_step_patterns = ['then', 'after that', 'also', 'and then', 'finally']
+    if any(p in message_lower for p in multi_step_patterns):
+        score += 0.15
+    
+    # Tool usage suggests complexity
+    score += min(0.3, tool_call_count * 0.1)
+    
+    # Clamp to valid range
+    return max(0.0, min(1.0, score))
+
+
+def calculate_prefix_hash(system_prompt: str, static_content: str = "") -> str:
+    """
+    Hash the static prefix portion of a prompt for prefix caching detection.
+    
+    Many LLM calls share identical prefixes (system prompt + context) but differ
+    only in the variable portion (e.g., different job descriptions). This hash
+    identifies shared prefixes to detect caching opportunities.
+    
+    Used by:
+    - Prefix cache detection: Find calls with identical prefixes
+    - Cost optimization: Recommend prompt prefix caching
+    - Dashboard Story 2: Cache opportunity analysis
+    
+    Usage:
+        # In quick_score_job - resume is static, job varies
+        prefix_hash = calculate_prefix_hash(SYSTEM_PROMPT, resume_text)
+        
+        track_llm_call(
+            prompt_prefix_hash=prefix_hash,
+            ...
+        )
+    
+    Args:
+        system_prompt: The system prompt text
+        static_content: Other static content (e.g., resume text that doesn't change)
+    
+    Returns:
+        16-character hex hash string
+    """
+    prefix = f"{system_prompt}\n{static_content}"
+    return hashlib.md5(prefix.encode()).hexdigest()[:16]
+
 # =============================================================================
 # HELPER FUNCTIONS: Token Breakdown & Model Parameters Extraction
 # =============================================================================
@@ -735,6 +827,9 @@ def track_llm_call(
     trace_id: str = None,
     request_id: str = None,
     environment: str = None,
+
+    # NEW: PREFIX CACHE DETECTION
+    prompt_prefix_hash: str = None,
     
     # NEW: EXPERIMENT TRACKING
     experiment_id: str = None,
@@ -875,7 +970,6 @@ def track_llm_call(
             system_prompt_tokens=system_prompt_tokens,
             user_message_tokens=user_message_tokens,
             chat_history_tokens=chat_history_tokens,
-            chat_history_count=None,
             response_text=response_text,
         )
     
@@ -964,6 +1058,9 @@ def track_llm_call(
         request_id=request_id,
         environment=environment,
         
+        # NEW: Prefix cache detection
+        prompt_prefix_hash=prompt_prefix_hash,
+        
         # NEW: Experiment tracking
         experiment_id=experiment_id,
         control_group=control_group,
@@ -1015,6 +1112,8 @@ __all__ = [
     # Helper functions for error classification and cache keys
     'classify_error',
     'generate_cache_key',
+    'calculate_complexity_score',
+    'calculate_prefix_hash',
     
     # Re-exported for convenience
     'create_routing_decision',

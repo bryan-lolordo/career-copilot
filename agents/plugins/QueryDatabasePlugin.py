@@ -34,6 +34,7 @@ from observatory_config import (
     classify_error,
     generate_cache_key,
     semantic_cache,
+    calculate_prefix_hash,
 )
 
 # Configure logging
@@ -219,7 +220,7 @@ SQL Query:"""
                 user_message_tokens=len(user_message) // 4,
             ) if create_prompt_breakdown else None
             
-            # LLM Judge evaluation (50% sampling) - Added for Tier 2
+            # LLM Judge evaluation
             quality_eval = await judge.maybe_evaluate(
                 operation="generate_sql",
                 prompt=full_prompt,
@@ -227,7 +228,6 @@ SQL Query:"""
                 llm_client=self.kernel,
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
             )
             
             # Tier 3: Routing decision (placeholder - ready for optimization)
@@ -279,6 +279,7 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Model configuration
                 temperature=0.0,  # SQL generation should be deterministic
@@ -287,6 +288,12 @@ SQL Query:"""
                 # NEW: Token breakdown (top-level)
                 system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
                 user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
+                # NEW: Prefix hash (schema is static, question varies)
+                prompt_prefix_hash=calculate_prefix_hash(system_prompt, self.schema[:1000]),
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -411,6 +418,10 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # Streaming
+                time_to_first_token_ms=None,
                 
                 # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -486,6 +497,10 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # Streaming
+                time_to_first_token_ms=None,
                 
                 # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -599,6 +614,10 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -636,6 +655,10 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -708,6 +731,10 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -743,6 +770,10 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -819,6 +850,10 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -855,6 +890,10 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),

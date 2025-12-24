@@ -60,6 +60,7 @@ from observatory_config import (
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
+    calculate_complexity_score,
 )
 
 load_dotenv()
@@ -536,10 +537,10 @@ async def main():
             
             # Tier 3: Routing decision (placeholder - ready for optimization)
             routing_decision = create_routing_decision(
-                chosen_model=DEFAULT_MODEL,  # Will be filled by observatory_config from env
+                chosen_model=DEFAULT_MODEL,
                 alternative_models=["gpt-4o", "gpt-4o-mini"],
                 reasoning="CLI chat interaction - using default model",
-                complexity_score=0.5
+                complexity_score=calculate_complexity_score(userInput, tool_call_count=tool_count)
             ) if create_routing_decision else None
             
             # Tier 3: Cache metadata (placeholder - ready for optimization)
@@ -581,7 +582,7 @@ async def main():
                 conversation_id=session.id if hasattr(session, 'id') else "cli_session",
                 turn_number=message_count,
                 user_id=None,  # Could be added if user authentication exists
-                parent_call_id=None,
+                parent_call_id=None,  # Orchestrator is root of call tree
                 
                 # NEW: Model configuration (from execution_settings)
                 temperature=0.7,
@@ -603,10 +604,13 @@ async def main():
                 tool_calls_made=tool_calls if tool_calls else None,
                 tool_call_count=tool_count,
                 tool_execution_time_ms=None,
+
+                # NEW: Streaming
+                time_to_first_token_ms=None,
                 
                 # NEW: Observability
                 trace_id=session.id if hasattr(session, 'id') else None,
-                request_id=None,
+                request_id=session.id + f"_turn{message_count}",  # Plugins use this as parent_call_id
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
                 # Metadata

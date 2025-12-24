@@ -348,6 +348,9 @@ class ScenarioRunner:
             track_llm_call, 
             estimate_tokens,
             classify_error,
+            calculate_complexity_score,
+            create_routing_decision,
+            DEFAULT_MODEL,
         )
         
         # ⭐ Generate request_id for this turn (matches chatbot.py)
@@ -438,9 +441,19 @@ class ScenarioRunner:
                 # Conversation linking
                 "conversation_id": memory.conversation_id,
                 "turn_number": memory.turn_number,
-                "parent_call_id": request_id,
+                "parent_call_id": None,  # Orchestrator is root of call tree
+                "request_id": request_id,
                 # Prompt breakdown (includes chat_history)
                 "prompt_breakdown": prompt_breakdown,
+                # Routing decision with complexity
+                "routing_decision": create_routing_decision(
+                    chosen_model=DEFAULT_MODEL,
+                    alternative_models=["gpt-4o", "gpt-4o-mini"],
+                    reasoning="Scenario test - using default model",
+                    complexity_score=calculate_complexity_score(user_input, tool_call_count=0)
+                ),
+                # Streaming
+                "time_to_first_token_ms": None,
                 # Test metadata
                 "metadata": {
                     "scenario_id": memory.context.test_metadata.get("scenario_id"),

@@ -31,6 +31,7 @@ from observatory_config import (
     classify_error,
     generate_cache_key,
     semantic_cache,  
+    calculate_prefix_hash,
 )
 
 # Configure logging
@@ -103,7 +104,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -137,7 +142,8 @@ class ResumeMatchingPlugin:
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+            parent_call_id=self.memory.request_id if self.memory else None,
+            request_id=self.memory.request_id if self.memory else None,
 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -196,7 +202,8 @@ class ResumeMatchingPlugin:
                     # NEW: Conversation linking
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+                    parent_call_id=self.memory.request_id if self.memory else None,
+                    request_id=self.memory.request_id if self.memory else None,
                     
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -238,7 +245,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -303,7 +314,8 @@ class ResumeMatchingPlugin:
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+            parent_call_id=self.memory.request_id if self.memory else None,
+            request_id=self.memory.request_id if self.memory else None,
 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -357,7 +369,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -416,7 +432,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -444,7 +464,8 @@ class ResumeMatchingPlugin:
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+            parent_call_id=self.memory.request_id if self.memory else None,
+            request_id=self.memory.request_id if self.memory else None,
 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -634,7 +655,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -663,7 +688,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -690,7 +719,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -746,7 +779,8 @@ class ResumeMatchingPlugin:
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+            parent_call_id=self.memory.request_id if self.memory else None,
+            request_id=self.memory.request_id if self.memory else None,
 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -801,7 +835,8 @@ class ResumeMatchingPlugin:
                     # NEW: Conversation linking
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+                    parent_call_id=self.memory.request_id if self.memory else None,
+                    request_id=self.memory.request_id if self.memory else None,
                     
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -835,7 +870,8 @@ class ResumeMatchingPlugin:
                     # NEW: Conversation linking
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+                    parent_call_id=self.memory.request_id if self.memory else None,
+                    request_id=self.memory.request_id if self.memory else None,
                     
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -886,7 +922,8 @@ class ResumeMatchingPlugin:
                     # NEW: Conversation linking
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+                    parent_call_id=self.memory.request_id if self.memory else None,
+                    request_id=self.memory.request_id if self.memory else None,
 
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -946,7 +983,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -982,7 +1023,11 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
@@ -1155,7 +1200,6 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                     llm_client=self.kernel,
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
-                    parent_call_id=self.memory.request_id if self.memory else None,
                 )
             
             # Tier 3: Routing decision
@@ -1210,6 +1254,7 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Model configuration
                 temperature=0.3,  # Factual scoring
@@ -1218,6 +1263,12 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 # NEW: Token breakdown (top-level)
                 system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
                 user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
+                # NEW: Prefix hash for cache detection (resume is static, job varies)
+                prompt_prefix_hash=calculate_prefix_hash(system_prompt, resume_text[:2000]),
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -1286,6 +1337,10 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -1456,7 +1511,6 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                     llm_client=self.kernel, 
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None, 
-                    parent_call_id=self.memory.request_id if self.memory else None,
                 )
             
             # Tier 3: Routing decision
@@ -1511,6 +1565,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
                 
                 # NEW: Model configuration
                 temperature=0.5,  # Balanced analysis
@@ -1519,6 +1574,12 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 # NEW: Token breakdown (top-level)
                 system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
                 user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
+                
+                # NEW: Prefix hash for cache detection (resume is static, job varies)
+                prompt_prefix_hash=calculate_prefix_hash(system_prompt, resume_text[:2000]),
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -1596,6 +1657,10 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
+                
+                # NEW: Streaming
+                time_to_first_token_ms=None,
                 
                 # NEW: Observability
                 environment=os.getenv("ENVIRONMENT", "development"),

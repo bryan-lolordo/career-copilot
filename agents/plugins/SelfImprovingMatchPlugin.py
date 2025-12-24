@@ -30,7 +30,8 @@ from observatory_config import (
     ExperimentMetadata,
     ErrorDetails,
     classify_error,
-    generate_cache_key
+    generate_cache_key,
+    calculate_prefix_hash,
 )
 
 # Configure logging
@@ -160,7 +161,7 @@ class SelfImprovingMatchPlugin:
                 guidance_text = ""
             
             analysis = await self._deep_analyze_with_guidance(
-                resume_text=resume['text'],
+                resume_text=resume['content'],
                 job=job,
                 guidance=guidance_text,
                 previous_analysis=current_analysis if iteration > 1 else None
@@ -388,7 +389,7 @@ Format:
             user_message_tokens=len(user_message) // 4,
         ) if create_prompt_breakdown else None
         
-        # LLM Judge evaluation (50% sampling)
+        # LLM Judge evaluation 
         quality_eval = await judge.maybe_evaluate(
             operation="deep_analyze_with_guidance",
             prompt=full_prompt[:5000],
@@ -445,7 +446,8 @@ Format:
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+            parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
 
             # NEW: Model configuration
             temperature=0.7,  # Creative writing for resume improvement
@@ -454,6 +456,12 @@ Format:
             # NEW: Token breakdown (top-level)
             system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
             user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+            
+            # NEW: Streaming
+            time_to_first_token_ms=None,
+            
+            # NEW: Prefix hash (system prompt + resume static, job varies)
+            prompt_prefix_hash=calculate_prefix_hash(system_prompt, resume_text[:2000]),
                 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -608,7 +616,7 @@ Company: {job.get('company', 'N/A')}
             user_message_tokens=len(user_message) // 4,
         ) if create_prompt_breakdown else None
         
-        # LLM Judge evaluation (50% sampling)
+        # LLM Judge evaluation 
         quality_eval = await judge.maybe_evaluate(
             operation="deep_analyze_with_guidance",
             prompt=full_prompt[:5000],
@@ -665,7 +673,8 @@ Company: {job.get('company', 'N/A')}
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+            parent_call_id=self.memory.request_id if self.memory else None,
+                request_id=self.memory.request_id if self.memory else None,
             
             # NEW: Model configuration
             temperature=0.5,  # Balanced analysis
@@ -674,6 +683,12 @@ Company: {job.get('company', 'N/A')}
             # NEW: Token breakdown (top-level)
             system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
             user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+            
+            # NEW: Streaming
+            time_to_first_token_ms=None,
+            
+            # NEW: Prefix hash
+            prompt_prefix_hash=calculate_prefix_hash(system_prompt, resume_text[:2000]),
             
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -793,7 +808,7 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             user_message_tokens=len(user_message) // 4,
         ) if create_prompt_breakdown else None
         
-        # LLM Judge evaluation (50% sampling)
+        # LLM Judge evaluation 
         quality_eval = await judge.maybe_evaluate(
             operation="critique_match",
             prompt=full_prompt,
@@ -801,7 +816,6 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             llm_client=self.kernel, 
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
         )
         
         # Tier 3: Routing decision (placeholder)
@@ -855,11 +869,18 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             # NEW: Token breakdown (top-level)
             system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
             user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+            
+            # NEW: Streaming
+            time_to_first_token_ms=None,
+            
+            # NEW: Prefix hash
+            prompt_prefix_hash=calculate_prefix_hash(system_prompt),
 
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+            parent_call_id=self.memory.request_id if self.memory else None,
+            request_id=self.memory.request_id if self.memory else None,
             
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -997,11 +1018,18 @@ CRITICAL: Return ONLY valid JSON."""
             # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
+            parent_call_id=self.memory.request_id if self.memory else None,
+            request_id=self.memory.request_id if self.memory else None,
             
             # NEW: Token breakdown (top-level)
             system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
             user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
+            
+            # NEW: Streaming
+            time_to_first_token_ms=None,
+            
+            # NEW: Prefix hash
+            prompt_prefix_hash=calculate_prefix_hash(system_prompt),
             
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
