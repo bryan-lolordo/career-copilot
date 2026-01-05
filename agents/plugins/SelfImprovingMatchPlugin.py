@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 # Observatory Integration - Complete imports
 from observatory_config import (
@@ -32,6 +33,8 @@ from observatory_config import (
     classify_error,
     generate_cache_key,
     calculate_prefix_hash,
+    estimate_tokens,
+    calculate_complexity_score,
 )
 
 # Configure logging
@@ -394,15 +397,15 @@ Format:
         latency_ms = (time.time() - llm_start_time) * 1000
         result_str = str(result).strip()
         
-        prompt_tokens = len(full_prompt) // 4
-        completion_tokens = len(result_str) // 4
+        prompt_tokens = estimate_tokens(full_prompt)
+        completion_tokens = estimate_tokens(result_str)
         
         # Create prompt breakdown for Tier 2
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
-            system_prompt_tokens=len(system_prompt) // 4,
+            system_prompt_tokens=estimate_tokens(system_prompt),
             user_message=user_message,
-            user_message_tokens=len(user_message) // 4,
+            user_message_tokens=estimate_tokens(user_message),
         ) if create_prompt_breakdown else None
         
         # LLM Judge evaluation 
@@ -463,7 +466,7 @@ Format:
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
             # NEW: Model configuration
             temperature=0.7,  # Creative writing for resume improvement
@@ -621,15 +624,15 @@ Company: {job.get('company', 'N/A')}
         latency_ms = (time.time() - llm_start_time) * 1000
         result_str = str(result).strip()
         
-        prompt_tokens = len(full_prompt) // 4
-        completion_tokens = len(result_str) // 4
+        prompt_tokens = estimate_tokens(full_prompt)
+        completion_tokens = estimate_tokens(result_str)
         
         # Create prompt breakdown for Tier 2
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
-            system_prompt_tokens=len(system_prompt) // 4,
+            system_prompt_tokens=estimate_tokens(system_prompt),
             user_message=user_message,
-            user_message_tokens=len(user_message) // 4,
+            user_message_tokens=estimate_tokens(user_message),
         ) if create_prompt_breakdown else None
         
         # LLM Judge evaluation 
@@ -690,7 +693,7 @@ Company: {job.get('company', 'N/A')}
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
             
             # NEW: Model configuration
             temperature=0.5,  # Balanced analysis
@@ -813,15 +816,15 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
         latency_ms = (time.time() - llm_start_time) * 1000
         result_str = str(result).strip()
         
-        prompt_tokens = len(full_prompt) // 4
-        completion_tokens = len(result_str) // 4
+        prompt_tokens = estimate_tokens(full_prompt)
+        completion_tokens = estimate_tokens(result_str)
         
         # Create prompt breakdown for Tier 2
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
-            system_prompt_tokens=len(system_prompt) // 4,
+            system_prompt_tokens=estimate_tokens(system_prompt),
             user_message=user_message,
-            user_message_tokens=len(user_message) // 4,
+            user_message_tokens=estimate_tokens(user_message),
         ) if create_prompt_breakdown else None
         
         # LLM Judge evaluation 
@@ -896,7 +899,7 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=self.memory.request_id if self.memory else None,
+            request_id=str(uuid.uuid4()),
             
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -972,15 +975,15 @@ CRITICAL: Return ONLY valid JSON."""
         latency_ms = (time.time() - llm_start_time) * 1000
         result_str = str(result).strip()
         
-        prompt_tokens = len(full_prompt) // 4
-        completion_tokens = len(result_str) // 4
+        prompt_tokens = estimate_tokens(full_prompt)
+        completion_tokens = estimate_tokens(result_str)
         
         # Create prompt breakdown for Tier 2
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
-            system_prompt_tokens=len(system_prompt) // 4,
+            system_prompt_tokens=estimate_tokens(system_prompt),
             user_message=user_message,
-            user_message_tokens=len(user_message) // 4,
+            user_message_tokens=estimate_tokens(user_message),
         ) if create_prompt_breakdown else None
         
         # Tier 3: Routing decision (placeholder)
@@ -1035,7 +1038,7 @@ CRITICAL: Return ONLY valid JSON."""
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=self.memory.request_id if self.memory else None,
+            request_id=str(uuid.uuid4()),
             
             # NEW: Token breakdown (top-level)
             system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,

@@ -10,6 +10,7 @@ import json
 import logging
 import time
 import os
+import uuid
 
 from services.job_api import search_jobs
 from services.db import save_jobs
@@ -165,7 +166,7 @@ class JobPlugin:
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
                     parent_call_id=self.memory.request_id if self.memory else None,
-                    request_id=self.memory.request_id if self.memory else None,
+                    request_id=str(uuid.uuid4()),
                     
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -244,7 +245,7 @@ class JobPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                     
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -298,7 +299,7 @@ class JobPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -388,7 +389,7 @@ class JobPlugin:
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=self.memory.request_id if self.memory else None,    
+            request_id=str(uuid.uuid4()),    
             
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -486,7 +487,7 @@ class JobPlugin:
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=self.memory.request_id if self.memory else None,
+            request_id=str(uuid.uuid4()),
             
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -566,7 +567,7 @@ class JobPlugin:
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
                     parent_call_id=self.memory.request_id if self.memory else None,
-                    request_id=self.memory.request_id if self.memory else None,
+                    request_id=str(uuid.uuid4()),
 
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -621,7 +622,7 @@ class JobPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -670,7 +671,7 @@ class JobPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,

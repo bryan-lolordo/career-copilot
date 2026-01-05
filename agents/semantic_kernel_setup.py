@@ -370,6 +370,10 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
     Returns:
         PromptBreakdown object or None
     """
+
+    # ✅ ADD THIS LINE
+    from observatory_config import estimate_tokens
+    
     if not create_prompt_breakdown:
         return None
     
@@ -384,7 +388,7 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
     for msg in messages:
         if msg.get("role", "").lower() == "system":
             system_prompt = msg.get("content", "")
-            system_tokens = len(system_prompt) // 4
+            system_tokens = estimate_tokens(system_prompt)
             break
     
     # Second pass: separate user messages from others
@@ -402,17 +406,17 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
     if user_messages:
         last_user = user_messages[-1]
         user_message = last_user.get("content", "")
-        user_tokens = len(user_message) // 4
+        user_tokens = estimate_tokens(user_message)
         
         # Previous user messages go to history
         for msg in user_messages[:-1]:
             chat_history.append(msg)
-            chat_history_tokens += len(msg.get("content", "")) // 4
+            chat_history_tokens += estimate_tokens(msg.get("content", ""))
     
     # All assistant/function messages go to history
     for msg in other_messages:
         chat_history.append(msg)
-        chat_history_tokens += len(msg.get("content", "")) // 4
+        chat_history_tokens += estimate_tokens(msg.get("content", ""))
     
     return create_prompt_breakdown(
         system_prompt=system_prompt,
@@ -503,6 +507,10 @@ async def main():
             
             # Track LLM call timing
             start_time = time.time()
+
+            # ✅ NEW: Track TTFT for future streaming support
+            ttft_start_time = time.time()
+            time_to_first_token_ms = None
             
             # Let the AI handle the conversation and plugin calls
             result = await chat_completion.get_chat_message_content(
@@ -510,6 +518,10 @@ async def main():
                 settings=execution_settings,
                 kernel=kernel,
             )
+
+            # ✅ NEW: Capture TTFT if streaming enabled
+            if hasattr(result, 'metadata') and result.metadata and result.metadata.get('is_streaming'):
+                time_to_first_token_ms = (time.time() - ttft_start_time) * 1000
             
             # Calculate latency
             latency_ms = (time.time() - start_time) * 1000
@@ -568,6 +580,13 @@ async def main():
                 cache_cluster_id="cli_chat"
             ) if create_cache_metadata else None
             
+            # Extract tool definition tokens automatically
+            tool_definitions_tokens = get_tool_definitions_tokens(kernel)
+
+            # Generate request_id for this turn (for plugin linking)
+            turn_request_id = f"{session.id}_turn{message_count}"
+            memory.request_id = turn_request_id  # ✅ ADD THIS
+
             # Track in Observatory - COMPLETE with ALL tiers
             track_llm_call(
                 # Core metrics (Tier 1) - model auto-detected from env
@@ -603,9 +622,9 @@ async def main():
                 parent_call_id=None,  # Orchestrator is root of call tree
                 
                 # NEW: Model configuration (from execution_settings)
-                temperature=0.7,
-                max_tokens=800,
-                top_p=None,
+                temperature=execution_settings.temperature,
+                max_tokens=execution_settings.max_tokens,
+                top_p=getattr(execution_settings, 'top_p', None),
                 
                 # NEW: Separate prompt components (for fast top-level queries)
                 system_prompt=SYSTEM_PROMPT,
@@ -616,7 +635,7 @@ async def main():
                 user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
                 chat_history_tokens=prompt_breakdown.chat_history_tokens if prompt_breakdown else None,
                 conversation_context_tokens=None,
-                tool_definitions_tokens=None,
+                tool_definitions_tokens=tool_definitions_tokens,
                 
                 # NEW: Tool/function calling
                 tool_calls_made=tool_calls if tool_calls else None,
@@ -624,12 +643,12 @@ async def main():
                 tool_execution_time_ms=None,
 
                 # NEW: Streaming
-                time_to_first_token_ms=None,
+                time_to_first_token_ms=time_to_first_token_ms,
                 
                 # NEW: Observability
                 trace_id=session.id if hasattr(session, 'id') else None,
-                request_id=session.id + f"_turn{message_count}",  # Plugins use this as parent_call_id
                 environment=os.getenv("ENVIRONMENT", "development"),
+                request_id=turn_request_id,
                 
                 # Metadata
                 metadata={
@@ -653,6 +672,108 @@ async def main():
         end_session(session, success=False, error=str(e))
         logger.error(f"CLI session ended with error: {e}")
         raise
+
+# ============================================================================
+# TOOL DEFINITION TOKEN EXTRACTION (for Observatory baseline tracking)
+# ============================================================================
+
+def get_tool_definitions_tokens(kernel) -> int:
+    """
+    Calculate total tool definition tokens for baseline Observatory tracking.
+    
+    Extracts FULL function schemas including all parameters, types, and constraints.
+    This matches what Azure OpenAI actually receives for function calling.
+    
+    Args:
+        kernel: Semantic Kernel instance with loaded plugins
+        
+    Returns:
+        int: Total tokens consumed by tool/function definitions
+    """
+    import tiktoken
+    import json
+    
+    try:
+        encoder = tiktoken.encoding_for_model("gpt-4")
+        total_tokens = 0
+        function_count = 0
+        
+        # ✅ DEBUG: Print what we're seeing
+        print(f"\n🔧 DEBUG: Extracting FULL tool definitions...")
+        print(f"   Kernel has {len(kernel.plugins)} plugins")
+        
+        # Iterate through all plugins in kernel
+        for plugin_name in kernel.plugins:
+            plugin = kernel.plugins[plugin_name]
+            plugin_function_count = len(plugin.functions)
+            
+            print(f"   📦 Plugin '{plugin_name}': {plugin_function_count} functions")
+            
+            # Iterate through functions in each plugin
+            for function_name in plugin.functions:
+                function = plugin.functions[function_name]
+                
+                # Build COMPLETE schema (what Azure actually gets)
+                schema = {
+                    "type": "function",
+                    "function": {
+                        "name": f"{plugin_name}-{function_name}",
+                        "description": function.description or "",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                }
+                
+                # Extract ALL parameters from function metadata
+                if hasattr(function, 'metadata') and function.metadata:
+                    params = function.metadata.parameters
+                    
+                    for param in params:
+                        # Get parameter type
+                        param_type = "string"  # Default
+                        if hasattr(param, 'type_'):
+                            type_str = str(param.type_)
+                            if 'int' in type_str.lower():
+                                param_type = "integer"
+                            elif 'float' in type_str.lower():
+                                param_type = "number"
+                            elif 'bool' in type_str.lower():
+                                param_type = "boolean"
+                            elif 'list' in type_str.lower() or 'array' in type_str.lower():
+                                param_type = "array"
+                            elif 'dict' in type_str.lower():
+                                param_type = "object"
+                        
+                        # Add parameter to schema
+                        schema["function"]["parameters"]["properties"][param.name] = {
+                            "type": param_type,
+                            "description": param.description or f"Parameter {param.name}",
+                        }
+                        
+                        # Track if required
+                        if param.is_required:
+                            schema["function"]["parameters"]["required"].append(param.name)
+                
+                # Calculate actual tokens for FULL schema
+                schema_json = json.dumps(schema, indent=2)
+                function_tokens = len(encoder.encode(schema_json))
+                total_tokens += function_tokens
+                function_count += 1
+        
+        print(f"   ✅ Total: {function_count} functions, {total_tokens} tokens")
+        print(f"   📊 Average: {total_tokens // function_count if function_count > 0 else 0} tokens/function")
+        return total_tokens
+        
+    except Exception as e:
+        # ❌ DEBUG: Show the error!
+        print(f"   ❌ ERROR extracting tools: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"   ⚠️  Using fallback estimate: 12,000 tokens")
+        return 12000  # Conservative estimate for ~60 functions
 
 
 # Run the main function when executed directly

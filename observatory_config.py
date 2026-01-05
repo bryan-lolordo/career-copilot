@@ -22,11 +22,14 @@ UPDATED: Now supports all 139 fields including conversation linking, model confi
          
 ADDED (Dec 2025): classify_error() and generate_cache_key() helpers for 
                   error classification and cache key generation.
+                  
+UPDATED (Dec 2025): Added chat_history_count auto-extraction for conversation tracking.
 """
 
 import os
 import re
 import hashlib
+import tiktoken
 from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv
 
@@ -55,7 +58,7 @@ from observatory import (
     create_quality_evaluation,
     create_prompt_metadata,
     create_prompt_breakdown,
-    estimate_tokens,
+    estimate_tokens as _sdk_estimate_tokens,
     
     # Models for type hints (existing)
     RoutingDecision,
@@ -75,6 +78,51 @@ from observatory import (
     SemanticCacheResult,
     create_semantic_cache_metadata,
 )
+
+# =============================================================================
+# OVERRIDE: Accurate Token Estimation with tiktoken
+# =============================================================================
+
+def estimate_tokens(text: str) -> int:
+    """
+    Accurately estimate tokens using tiktoken (matches Azure OpenAI).
+    
+    Overrides the SDK's rough estimate (len // 4) with precise counting
+    using the same encoding that Azure OpenAI uses internally.
+    
+    This fixes the 74% unknown tokens issue by properly counting large
+    system prompts (~11,000 tokens vs SDK's ~500 estimate).
+    
+    Args:
+        text: Text to tokenize
+        
+    Returns:
+        int: Accurate token count
+    """
+    if not text:
+        return 0
+    
+    try:
+        encoder = tiktoken.encoding_for_model("gpt-4")
+        return len(encoder.encode(text))
+    except Exception as e:
+        print(f"⚠️ tiktoken error: {e}, using fallback estimate")
+        return _sdk_estimate_tokens(text)
+
+# ✅ ADD THIS TEST BLOCK
+print("="*70)
+print("🧪 TESTING estimate_tokens OVERRIDE")
+test_text = "You are a helpful assistant." * 100  # ~3000 chars
+sdk_estimate = len(test_text) // 4  # Rough estimate: ~750
+tiktoken_actual = estimate_tokens(test_text)
+print(f"   Test text: {len(test_text)} characters")
+print(f"   SDK estimate (len//4): {sdk_estimate}")
+print(f"   Tiktoken actual: {tiktoken_actual}")
+if tiktoken_actual != sdk_estimate:
+    print(f"   ✅ Override IS working! ({abs(tiktoken_actual - sdk_estimate)} token difference)")
+else:
+    print(f"   ❌ Override NOT working! (same result)")
+print("="*70)
 
 # =============================================================================
 # PHASE CONFIGURATION
@@ -102,11 +150,13 @@ PROJECT_NAME = "Career Copilot"
 DEFAULT_PROVIDER = ModelProvider.AZURE
 DEFAULT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
 
-# Database path - adjust to your Observatory location
-OBSERVATORY_DB_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "ai-agent-observatory", "observatory.db")
-)
-if 'DATABASE_URL' not in os.environ:
+# Database path - use environment variable if set, otherwise fall back to relative path
+if 'DATABASE_URL' in os.environ:
+    OBSERVATORY_DB_PATH = os.environ['DATABASE_URL'].replace('sqlite:///', '')
+else:
+    OBSERVATORY_DB_PATH = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "ai-agent-observatory", "observatory.db")
+    )
     os.environ['DATABASE_URL'] = f"sqlite:///{OBSERVATORY_DB_PATH}"
 
 print(f"📦 Observatory Config: {PROJECT_NAME}")
@@ -607,7 +657,7 @@ def extract_token_breakdown_from_messages(
     """Extract token breakdown from various message formats.
     
     Auto-populates system_prompt_tokens, user_message_tokens, chat_history_tokens,
-    and conversation_context_tokens for comprehensive token tracking.
+    chat_history_count, and conversation_context_tokens for comprehensive token tracking.
     
     Args:
         messages: Full messages array (OpenAI/SK format)
@@ -623,12 +673,14 @@ def extract_token_breakdown_from_messages(
         'system_prompt_tokens': 0,
         'user_message_tokens': 0,
         'chat_history_tokens': 0,
+        'chat_history_count': 0,  # ✅ CHANGE 1: Added chat_history_count
         'conversation_context_tokens': 0,
     }
     
     # Method 1: Extract from messages array (OpenAI/Azure format)
     if messages:
         user_messages = []
+        assistant_messages = []  # Track separately for count
         
         for msg in messages:
             role = msg.get('role', '')
@@ -640,6 +692,7 @@ def extract_token_breakdown_from_messages(
             elif role == 'user':
                 user_messages.append((content, tokens))  # Store all user messages
             elif role in ['assistant', 'function']:
+                assistant_messages.append((content, tokens))  # Store for counting
                 breakdown['chat_history_tokens'] += tokens
         
         # Last user message is current, rest go to history
@@ -650,6 +703,10 @@ def extract_token_breakdown_from_messages(
             # Previous user messages go to history
             for content, tokens in user_messages[:-1]:
                 breakdown['chat_history_tokens'] += tokens
+        
+        # ✅ CHANGE 2: Calculate chat_history_count
+        # Count = previous user messages + all assistant messages
+        breakdown['chat_history_count'] = (len(user_messages) - 1) + len(assistant_messages)
     
     # Method 2: Extract from individual strings
     else:
@@ -664,12 +721,15 @@ def extract_token_breakdown_from_messages(
             try:
                 if hasattr(chat_history, 'messages'):
                     history_tokens = 0
+                    history_count = 0
                     for msg in chat_history.messages:
                         # Skip system messages (already counted)
                         if hasattr(msg, 'role') and msg.role != 'system':
                             content = str(msg.content) if hasattr(msg, 'content') else ''
                             history_tokens += estimate_tokens(content)
+                            history_count += 1
                     breakdown['chat_history_tokens'] = history_tokens
+                    breakdown['chat_history_count'] = history_count
             except Exception:
                 pass  # Silent fail
 
@@ -680,11 +740,14 @@ def extract_token_breakdown_from_messages(
                     history = conversation_memory.chat_history
                     if hasattr(history, 'messages'):
                         history_tokens = 0
+                        history_count = 0
                         for msg in history.messages:
                             if hasattr(msg, 'role') and msg.role != 'system':
                                 content = str(msg.content) if hasattr(msg, 'content') else ''
                                 history_tokens += estimate_tokens(content)
+                                history_count += 1
                         breakdown['chat_history_tokens'] = history_tokens
+                        breakdown['chat_history_count'] = history_count
             except Exception:
                 pass  # Silent fail
     
@@ -810,6 +873,7 @@ def track_llm_call(
     system_prompt_tokens: int = None,
     user_message_tokens: int = None,
     chat_history_tokens: int = None,
+    chat_history_count: int = None,
     conversation_context_tokens: int = None,
     tool_definitions_tokens: int = None,
     
@@ -900,6 +964,7 @@ def track_llm_call(
         system_prompt_tokens: System prompt token count
         user_message_tokens: User message token count
         chat_history_tokens: Chat history token count
+        chat_history_count: Number of messages in chat history
         conversation_context_tokens: Conversation memory/state tokens
         tool_definitions_tokens: Function calling schema tokens
         
@@ -952,10 +1017,11 @@ def track_llm_call(
             conversation_memory=metadata.get('conversation_memory') if metadata else None
         )
         
-        # Use extracted values
+        # ✅ CHANGE 3: Extract chat_history_count from token_breakdown
         system_prompt_tokens = system_prompt_tokens or token_breakdown['system_prompt_tokens']
         user_message_tokens = user_message_tokens or token_breakdown['user_message_tokens']
         chat_history_tokens = chat_history_tokens or token_breakdown['chat_history_tokens']
+        chat_history_count = chat_history_count or token_breakdown.get('chat_history_count', 0)
         conversation_context_tokens = conversation_context_tokens or token_breakdown['conversation_context_tokens']
     
     # Extract model parameters if not explicitly provided
@@ -1041,6 +1107,7 @@ def track_llm_call(
         system_prompt_tokens=system_prompt_tokens,
         user_message_tokens=user_message_tokens,
         chat_history_tokens=chat_history_tokens,
+        chat_history_count=chat_history_count,  # ✅ CHANGE 4: Pass chat_history_count to SDK
         conversation_context_tokens=conversation_context_tokens,
         tool_definitions_tokens=tool_definitions_tokens,
         

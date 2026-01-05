@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 # Observatory Integration - Complete imports
 from observatory_config import (
@@ -30,6 +31,8 @@ from observatory_config import (
     classify_error,
     generate_cache_key,
     calculate_prefix_hash,
+    estimate_tokens,
+    calculate_complexity_score,
 )
 
 # Configure logging
@@ -157,15 +160,15 @@ Required JSON format:
             result_str = str(result).strip()
             
             # Estimate tokens
-            prompt_tokens = len(full_prompt) // 4
-            completion_tokens = len(result_str) // 4
+            prompt_tokens = estimate_tokens(full_prompt)
+            completion_tokens = estimate_tokens(result_str)
             
             # Create prompt breakdown for Tier 2
             prompt_breakdown = create_prompt_breakdown(
                 system_prompt=system_prompt,
-                system_prompt_tokens=len(system_prompt) // 4,
+                system_prompt_tokens=estimate_tokens(system_prompt),
                 user_message=user_message,
-                user_message_tokens=len(user_message) // 4,
+                user_message_tokens=estimate_tokens(user_message),
             ) if create_prompt_breakdown else None
             
             # LLM Judge evaluation 
@@ -225,7 +228,7 @@ Required JSON format:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Model configuration
                 temperature=0.7,  # Creative writing for resume improvement
@@ -292,7 +295,7 @@ Required JSON format:
             
             # Track failed call
             track_llm_call(
-                prompt_tokens=len(full_prompt) // 4 if 'full_prompt' in locals() else 0,
+                prompt_tokens=estimate_tokens(full_prompt) if 'full_prompt' in locals() else 0,
                 completion_tokens=0,
                 latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
                 agent_name="ResumeTailoring",
@@ -346,7 +349,7 @@ Required JSON format:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
@@ -440,7 +443,7 @@ Copy each improved bullet below and paste into your resume:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -481,7 +484,7 @@ Copy each improved bullet below and paste into your resume:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),

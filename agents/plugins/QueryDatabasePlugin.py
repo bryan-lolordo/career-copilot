@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 
 from services.db import DB_PATH
 
@@ -35,6 +36,8 @@ from observatory_config import (
     generate_cache_key,
     semantic_cache,
     calculate_prefix_hash,
+    estimate_tokens,
+    calculate_complexity_score,
 )
 
 # Configure logging
@@ -198,8 +201,8 @@ SQL Query:"""
                 result = await self.kernel.invoke_prompt(full_prompt)
                 latency_ms = (time.time() - llm_start_time) * 1000
                 generated_sql = str(result).strip()
-                prompt_tokens = len(full_prompt) // 4
-                completion_tokens = len(generated_sql) // 4
+                prompt_tokens = estimate_tokens(full_prompt)
+                completion_tokens = estimate_tokens(generated_sql)
                 cache_hit = False
                 
                 # Store in cache for next time
@@ -215,9 +218,9 @@ SQL Query:"""
             # Create prompt breakdown for Tier 2
             prompt_breakdown = create_prompt_breakdown(
                 system_prompt=system_prompt,
-                system_prompt_tokens=len(system_prompt) // 4,
+                system_prompt_tokens=estimate_tokens(system_prompt),
                 user_message=user_message,
-                user_message_tokens=len(user_message) // 4,
+                user_message_tokens=estimate_tokens(user_message),
             ) if create_prompt_breakdown else None
             
             # LLM Judge evaluation
@@ -235,7 +238,7 @@ SQL Query:"""
                 chosen_model=DEFAULT_MODEL,
                 alternative_models=["gpt-4o", "gpt-4o-mini"],
                 reasoning="SQL generation - deterministic task",
-                complexity_score=0.4
+                complexity_score=calculate_complexity_score(question)
             ) if create_routing_decision else None
             
             # Tier 3: Cache metadata - WITH REAL DATA
@@ -279,7 +282,7 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Model configuration
                 temperature=0.0,  # SQL generation should be deterministic
@@ -360,17 +363,17 @@ SQL Query:"""
             
         except sqlite3.Error as e:
             # Phase 2 Fix: Complete error tracking with token breakdown, routing, cache
-            
+
             # Token breakdown (use cached values if available)
-            _system_tokens = len(system_prompt) // 4 if 'system_prompt' in locals() else None
-            _user_tokens = len(user_message) // 4 if 'user_message' in locals() else None
-            
+            _system_tokens = estimate_tokens(system_prompt) if 'system_prompt' in locals() else None
+            _user_tokens = estimate_tokens(user_message) if 'user_message' in locals() else None
+
             # Routing decision (same as success path)
             _routing = create_routing_decision(
                 chosen_model=DEFAULT_MODEL,
                 alternative_models=["gpt-4o", "gpt-4o-mini"],
                 reasoning="SQL generation - deterministic task (error path)",
-                complexity_score=0.4
+                complexity_score=calculate_complexity_score(question)
             ) if create_routing_decision else None
             
             # Cache metadata (use values from earlier if available)
@@ -382,8 +385,8 @@ SQL Query:"""
             
             track_llm_call(
                 # Core metrics (Tier 1)
-                prompt_tokens=len(full_prompt) // 4 if 'full_prompt' in locals() else 0,
-                completion_tokens=len(generated_sql) // 4 if 'generated_sql' in locals() else 0,
+                prompt_tokens=estimate_tokens(full_prompt) if 'full_prompt' in locals() else 0,
+                completion_tokens=estimate_tokens(generated_sql) if 'generated_sql' in locals() else 0,
                 latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
                 agent_name="DatabaseQuery",
                 agent_role="analyst",
@@ -391,25 +394,25 @@ SQL Query:"""
                 success=False,
                 error=f"Database error: {str(e)}",
                 prompt_metadata=SQL_PROMPT_META,
-                
+
                 # Prompt content (Tier 2) - Phase 2 addition
                 system_prompt=system_prompt if 'system_prompt' in locals() else None,
                 user_message=user_message if 'user_message' in locals() else None,
                 response_text=generated_sql if 'generated_sql' in locals() else None,
-                
+
                 # Token breakdown (Tier 2) - Phase 2 addition
                 system_prompt_tokens=_system_tokens,
                 user_message_tokens=_user_tokens,
-                
+
                 # Model config (Tier 2)
                 temperature=0.0,
-                
+
                 # Routing decision (Tier 3) - Phase 2 addition
                 routing_decision=_routing,
-                
+
                 # Cache metadata (Tier 3) - Phase 2 addition
                 cache_metadata=_cache_meta,
-                
+
                 # Error details
                 error_type="sqlite_error",
                 retry_count=0,
@@ -418,14 +421,14 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
-                
+                request_id=str(uuid.uuid4()),
+
                 # Streaming
                 time_to_first_token_ms=None,
-                
+
                 # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
+
                 metadata={
                     "question": question[:200],
                     "generated_sql": generated_sql[:300] if 'generated_sql' in locals() else None,
@@ -436,20 +439,20 @@ SQL Query:"""
             )
             return f"❌ Database error: {str(e)}\nGenerated SQL was: {generated_sql if 'generated_sql' in locals() else 'N/A'}"
 
-        # generate_sql    
+        # generate_sql
         except Exception as e:
             # Phase 2 Fix: Complete error tracking with token breakdown, routing, cache
-            
+
             # Token breakdown (use cached values if available)
-            _system_tokens = len(system_prompt) // 4 if 'system_prompt' in locals() else None
-            _user_tokens = len(user_message) // 4 if 'user_message' in locals() else None
-            
+            _system_tokens = estimate_tokens(system_prompt) if 'system_prompt' in locals() else None
+            _user_tokens = estimate_tokens(user_message) if 'user_message' in locals() else None
+
             # Routing decision (same as success path)
             _routing = create_routing_decision(
                 chosen_model=DEFAULT_MODEL,
                 alternative_models=["gpt-4o", "gpt-4o-mini"],
                 reasoning="SQL generation - deterministic task (error path)",
-                complexity_score=0.4
+                complexity_score=calculate_complexity_score(question)
             ) if create_routing_decision else None
             
             # Cache metadata (use values from earlier if available)
@@ -461,8 +464,8 @@ SQL Query:"""
             
             track_llm_call(
                 # Core metrics (Tier 1)
-                prompt_tokens=len(full_prompt) // 4 if 'full_prompt' in locals() else 0,
-                completion_tokens=len(generated_sql) // 4 if 'generated_sql' in locals() else 0,
+                prompt_tokens=estimate_tokens(full_prompt) if 'full_prompt' in locals() else 0,
+                completion_tokens=estimate_tokens(generated_sql) if 'generated_sql' in locals() else 0,
                 latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
                 agent_name="DatabaseQuery",
                 agent_role="analyst",
@@ -470,25 +473,25 @@ SQL Query:"""
                 success=False,
                 error=str(e),
                 prompt_metadata=SQL_PROMPT_META,
-                
+
                 # Prompt content (Tier 2) - Phase 2 addition
                 system_prompt=system_prompt if 'system_prompt' in locals() else None,
                 user_message=user_message if 'user_message' in locals() else None,
                 response_text=generated_sql if 'generated_sql' in locals() else None,
-                
+
                 # Token breakdown (Tier 2) - Phase 2 addition
                 system_prompt_tokens=_system_tokens,
                 user_message_tokens=_user_tokens,
-                
+
                 # Model config (Tier 2)
                 temperature=0.0,
-                
+
                 # Routing decision (Tier 3) - Phase 2 addition
                 routing_decision=_routing,
-                
+
                 # Cache metadata (Tier 3) - Phase 2 addition
                 cache_metadata=_cache_meta,
-                
+
                 # ERROR CLASSIFICATION
                 **classify_error(e, operation="generate_sql"),
                 retry_count=0,
@@ -497,14 +500,14 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
-                
+                request_id=str(uuid.uuid4()),
+
                 # Streaming
                 time_to_first_token_ms=None,
-                
+
                 # Observability
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
+
                 metadata={
                     "question": question[:200],
                     "generated_sql": generated_sql[:300] if 'generated_sql' in locals() else None,
@@ -614,7 +617,7 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -655,7 +658,7 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -731,7 +734,7 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -770,7 +773,7 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -850,7 +853,7 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -890,7 +893,7 @@ SQL Query:"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,

@@ -11,6 +11,7 @@ import json
 import logging
 import time
 import os
+import uuid
 
 # Observatory Integration - Complete imports
 from observatory_config import (
@@ -30,8 +31,10 @@ from observatory_config import (
     ErrorDetails,
     classify_error,
     generate_cache_key,
-    semantic_cache,  
+    semantic_cache,
     calculate_prefix_hash,
+    estimate_tokens,
+    calculate_complexity_score,
 )
 
 # Configure logging
@@ -104,7 +107,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -143,7 +146,7 @@ class ResumeMatchingPlugin:
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=self.memory.request_id if self.memory else None,
+            request_id=str(uuid.uuid4()),
 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -203,7 +206,7 @@ class ResumeMatchingPlugin:
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
                     parent_call_id=self.memory.request_id if self.memory else None,
-                    request_id=self.memory.request_id if self.memory else None,
+                    request_id=str(uuid.uuid4()),
                     
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -245,7 +248,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -315,7 +318,7 @@ class ResumeMatchingPlugin:
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=self.memory.request_id if self.memory else None,
+            request_id=str(uuid.uuid4()),
 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -369,7 +372,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -432,7 +435,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -465,7 +468,7 @@ class ResumeMatchingPlugin:
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=self.memory.request_id if self.memory else None,
+            request_id=str(uuid.uuid4()),
 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -655,7 +658,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -688,7 +691,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -719,7 +722,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -780,7 +783,7 @@ class ResumeMatchingPlugin:
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=self.memory.request_id if self.memory else None,
+            request_id=str(uuid.uuid4()),
 
             # NEW: Observability
             environment=os.getenv("ENVIRONMENT", "development"),
@@ -836,7 +839,7 @@ class ResumeMatchingPlugin:
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
                     parent_call_id=self.memory.request_id if self.memory else None,
-                    request_id=self.memory.request_id if self.memory else None,
+                    request_id=str(uuid.uuid4()),
                     
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -871,7 +874,7 @@ class ResumeMatchingPlugin:
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
                     parent_call_id=self.memory.request_id if self.memory else None,
-                    request_id=self.memory.request_id if self.memory else None,
+                    request_id=str(uuid.uuid4()),
                     
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -923,7 +926,7 @@ class ResumeMatchingPlugin:
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
                     parent_call_id=self.memory.request_id if self.memory else None,
-                    request_id=self.memory.request_id if self.memory else None,
+                    request_id=str(uuid.uuid4()),
 
                     # NEW: Observability
                     environment=os.getenv("ENVIRONMENT", "development"),
@@ -983,7 +986,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -1023,7 +1026,7 @@ class ResumeMatchingPlugin:
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -1168,8 +1171,8 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 result = await self.kernel.invoke_prompt(prompt)
                 latency_ms = (time.time() - llm_start_time) * 1000
                 result_str = str(result).strip()
-                prompt_tokens = len(prompt) // 4
-                completion_tokens = len(result_str) // 4
+                prompt_tokens = estimate_tokens(prompt)
+                completion_tokens = estimate_tokens(result_str)
                 cache_hit = False
                 
                 # Store in cache for next time
@@ -1185,9 +1188,9 @@ Description: {job.get('description', 'N/A')[:1500]}"""
             # Create prompt breakdown for Tier 2
             prompt_breakdown = create_prompt_breakdown(
                 system_prompt=system_prompt,
-                system_prompt_tokens=len(system_prompt) // 4,
+                system_prompt_tokens=estimate_tokens(system_prompt),
                 user_message=user_message,
-                user_message_tokens=len(user_message) // 4,
+                user_message_tokens=estimate_tokens(user_message),
             ) if create_prompt_breakdown else None
             
             # Phase 4: LLM Judge evaluation - SKIP if cache hit (no new generation)
@@ -1254,7 +1257,7 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Model configuration
                 temperature=0.3,  # Factual scoring
@@ -1319,7 +1322,7 @@ Description: {job.get('description', 'N/A')[:1500]}"""
             # Track error
             track_llm_call(
                 model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
-                prompt_tokens=len(prompt) // 4 if 'prompt' in locals() else 0,
+                prompt_tokens=estimate_tokens(prompt) if 'prompt' in locals() else 0,
                 completion_tokens=0,
                 latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
                 agent_name="ResumeMatching",
@@ -1337,7 +1340,7 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,
@@ -1479,8 +1482,8 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 result = await self.kernel.invoke_prompt(prompt)
                 latency_ms = (time.time() - llm_start_time) * 1000
                 result_str = str(result).strip()
-                prompt_tokens = len(prompt) // 4
-                completion_tokens = len(result_str) // 4
+                prompt_tokens = estimate_tokens(prompt)
+                completion_tokens = estimate_tokens(result_str)
                 cache_hit = False
                 
                 # Store in cache for next time
@@ -1496,9 +1499,9 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
             # Create prompt breakdown for Tier 2
             prompt_breakdown = create_prompt_breakdown(
                 system_prompt=system_prompt,
-                system_prompt_tokens=len(system_prompt) // 4,
+                system_prompt_tokens=estimate_tokens(system_prompt),
                 user_message=user_message,
-                user_message_tokens=len(user_message) // 4,
+                user_message_tokens=estimate_tokens(user_message),
             ) if create_prompt_breakdown else None
             
             # LLM Judge evaluation - SKIP if cache hit (no new generation to judge)
@@ -1565,7 +1568,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Model configuration
                 temperature=0.5,  # Balanced analysis
@@ -1640,7 +1643,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
             # Track error
             track_llm_call(
                 model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini"),
-                prompt_tokens=len(prompt) // 4 if 'prompt' in locals() else 0,
+                prompt_tokens=estimate_tokens(prompt) if 'prompt' in locals() else 0,
                 completion_tokens=0,
                 latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
                 agent_name="ResumeMatching",
@@ -1657,7 +1660,7 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=self.memory.request_id if self.memory else None,
+                request_id=str(uuid.uuid4()),
                 
                 # NEW: Streaming
                 time_to_first_token_ms=None,

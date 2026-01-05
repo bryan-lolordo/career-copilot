@@ -120,11 +120,21 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
 
         # Send request to Semantic Kernel / Azure OpenAI
         llm_start_time = time.time()
+
+        # ✅ NEW: Track TTFT for future streaming support
+        ttft_start_time = time.time()
+        time_to_first_token_ms = None
+
         response = await chat_completion.get_chat_message_content(
             chat_history=history,
             settings=execution_settings,
             kernel=kernel,
         )
+
+        # ✅ NEW: Capture TTFT if streaming enabled
+        if hasattr(response, 'metadata') and response.metadata and response.metadata.get('is_streaming'):
+            time_to_first_token_ms = (time.time() - ttft_start_time) * 1000
+            
         latency_ms = (time.time() - llm_start_time) * 1000
         logger.info(f"LLM response received: {latency_ms:.0f}ms")
 
@@ -157,6 +167,10 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         # Create prompt breakdown for Tier 2
         prompt_breakdown = create_prompt_breakdown_from_messages(messages_for_breakdown)
         
+        # Extract tool definition tokens automatically
+        from agents.semantic_kernel_setup import get_tool_definitions_tokens
+        tool_definitions_tokens = get_tool_definitions_tokens(kernel)
+
         # LLM Judge evaluation (50% sampling)
         quality_eval = await judge.maybe_evaluate(
             operation="streamlit_chat",
@@ -215,9 +229,9 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             parent_call_id=None,  # Orchestrator is root of call tree
             
             # NEW: Model configuration (from execution_settings)
-            temperature=0.7,
-            max_tokens=800,
-            top_p=None,
+            temperature=execution_settings.temperature,
+            max_tokens=execution_settings.max_tokens,
+            top_p=getattr(execution_settings, 'top_p', None),
             
             # NEW: Separate prompt components (for fast top-level queries)
             system_prompt=SYSTEM_PROMPT,
@@ -228,7 +242,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
             chat_history_tokens=prompt_breakdown.chat_history_tokens if prompt_breakdown else None,
             conversation_context_tokens=None,
-            tool_definitions_tokens=None,
+            tool_definitions_tokens=tool_definitions_tokens, 
             
             # NEW: Tool/function calling
             tool_calls_made=tool_calls if tool_calls else None,
@@ -236,7 +250,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             tool_execution_time_ms=None,
 
             # NEW: Streaming (None = not streaming, enables recommendation detection)
-            time_to_first_token_ms=None,
+            time_to_first_token_ms=time_to_first_token_ms, 
             
             # NEW: Observability
             trace_id=obs_session.id if hasattr(obs_session, 'id') else None,
@@ -276,6 +290,10 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
     except Exception as e:
         logger.error(f"Error in chat_with_kernel: {e}", exc_info=True)
         
+        # Extract tool tokens even on error
+        from agents.semantic_kernel_setup import get_tool_definitions_tokens
+        tool_definitions_tokens = get_tool_definitions_tokens(kernel)
+
         # Track failed call - COMPLETE
         track_llm_call(
             prompt_tokens=0,
@@ -306,10 +324,13 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             user_id=None,
             parent_call_id=None,  # Orchestrator is root of call tree
             
-            # NEW: Model configuration
-            temperature=0.7,
-            max_tokens=800,
-            top_p=None,
+            # NEW: Model configuration (from execution_settings)
+            temperature=execution_settings.temperature,
+            max_tokens=execution_settings.max_tokens,
+            top_p=getattr(execution_settings, 'top_p', None),
+
+            # NEW: Token breakdown
+            tool_definitions_tokens=tool_definitions_tokens,
             
             # NEW: Error details
             error_type=type(e).__name__,
@@ -378,6 +399,8 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
     Returns:
         PromptBreakdown object or None
     """
+    from observatory_config import estimate_tokens
+
     if not create_prompt_breakdown:
         return None
     
@@ -392,7 +415,7 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
     for msg in messages:
         if msg.get("role", "").lower() == "system":
             system_prompt = msg.get("content", "")
-            system_tokens = len(system_prompt) // 4
+            system_tokens = estimate_tokens(system_prompt)
             break
     
     # Second pass: process user/assistant messages
@@ -411,17 +434,17 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
     if user_messages:
         last_user = user_messages[-1]
         user_message = last_user.get("content", "")
-        user_tokens = len(user_message) // 4
+        user_tokens = estimate_tokens(user_message)
         
         # All PREVIOUS user messages go into history
         for msg in user_messages[:-1]:
             chat_history.append(msg)
-            chat_history_tokens += len(msg.get("content", "")) // 4
+            chat_history_tokens += estimate_tokens(msg.get("content", ""))
     
     # ALL assistant messages go into history
     for msg in assistant_messages:
         chat_history.append(msg)
-        chat_history_tokens += len(msg.get("content", "")) // 4
+        chat_history_tokens += estimate_tokens(msg.get("content", ""))
     
     return create_prompt_breakdown(
         system_prompt=system_prompt,
