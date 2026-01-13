@@ -306,7 +306,7 @@ def create_kernel_with_plugins(memory: ConversationMemory = None):
     kernel.add_plugin(JobPlugin(context=memory.context, memory=memory), plugin_name="JobPlugin")
     
     # Create matching plugin instance (reused across others)
-    resume_matching_plugin = ResumeMatchingPlugin(kernel, db_service, memory)
+    resume_matching_plugin = ResumeMatchingPlugin(kernel, chat_completion, db_service, memory)
     kernel.add_plugin(resume_matching_plugin, plugin_name="ResumeMatching")
     
     # Preprocessor plugins (no memory needed)
@@ -336,7 +336,7 @@ def create_execution_settings() -> AzureChatPromptExecutionSettings:
     execution_settings = AzureChatPromptExecutionSettings()
     execution_settings.function_choice_behavior = FunctionChoiceBehavior.Auto()
     execution_settings.max_tokens = 800
-    execution_settings.temperature = 0.7
+    execution_settings.temperature = 0
     return execution_settings
 
 

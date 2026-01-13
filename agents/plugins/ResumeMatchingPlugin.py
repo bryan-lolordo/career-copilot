@@ -57,7 +57,7 @@ QUICK_SCORE_PROMPT_VERSION = "1.0.0"
 DEEP_ANALYSIS_PROMPT_VERSION = "1.0.0"
 
 class ResumeMatchingPlugin:
-    def __init__(self, kernel, database_service, memory=None):
+    def __init__(self, kernel, chat_completion, database_service, memory=None):
         """
         Args:
             kernel: Your Semantic Kernel instance
@@ -65,6 +65,7 @@ class ResumeMatchingPlugin:
             memory: ConversationMemory instance for context tracking
         """
         self.kernel = kernel
+        self.chat_completion = chat_completion
         self.db = database_service
         self.memory = memory
 
@@ -1155,7 +1156,12 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                         operation=operation,
                         default_prompt=system_prompt
                     )
-                    
+                    # Passthrough: if optimizer returns None, use the original system_prompt
+                    if optimized_prompt is None:
+                        optimized_prompt = system_prompt
+                    if max_tokens_limit is None:
+                        max_tokens_limit = 1500  # Default for quick scoring
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 4: Get routed model
                     # ═══════════════════════════════════════════════════════════════
@@ -1174,28 +1180,70 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                         system_prompt=optimized_prompt,
                         system_prompt_tokens=estimate_tokens(optimized_prompt),
                     )
-                    
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 6: Make LLM call (use optimized values)
                     # ═══════════════════════════════════════════════════════════════
                     # Redefine full_prompt with optimized prompt for caching
                     full_prompt = f"{optimized_prompt}\n\n{user_message}"
-                    
-                    # Use kernel (BASELINE - this was working)
+
+                    # Make LLM call using chat completion
+                    from semantic_kernel.contents import ChatHistory
+                    from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+                        AzureChatPromptExecutionSettings,
+                    )
+
+                    quick_score_history = ChatHistory()
+                    quick_score_history.add_system_message(optimized_prompt)
+                    quick_score_history.add_user_message(user_message)
+
+                    # DEBUG LOGGING: See what's being sent to the LLM
+                    logger.info(f"[QUICK_SCORE] === LLM REQUEST for job: {job.get('title', 'Unknown')} ===")
+                    logger.info(f"[QUICK_SCORE] System prompt (first 300 chars):\n{optimized_prompt[:300]}...")
+                    logger.info(f"[QUICK_SCORE] User message (first 200 chars):\n{user_message[:200]}...")
+                    logger.info(f"[QUICK_SCORE] History has {len(quick_score_history.messages)} messages:")
+                    for i, msg in enumerate(quick_score_history.messages):
+                        role = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
+                        content_preview = str(msg.content)[:150].replace('\n', ' ')
+                        logger.info(f"[QUICK_SCORE]   [{i}] {role}: {content_preview}...")
+
+                    # Create ISOLATED execution settings WITHOUT function calling
+                    # This prevents the kernel's global system prompt from interfering
+                    quick_score_settings = AzureChatPromptExecutionSettings()
+                    quick_score_settings.max_tokens = 1500
+                    quick_score_settings.temperature = 0.3
+                    # NO function_choice_behavior - we want pure completion, not tool calling
+
                     llm_start_time = time.time()
-                    result = await self.kernel.invoke_prompt(
-                        prompt=optimized_prompt,
-                        user_message=user_message,
-                        max_tokens=max_tokens_limit,
-                        temperature=0.3,  # Quick score uses 0.3
+                    result = await self.chat_completion.get_chat_message_content(
+                        chat_history=quick_score_history,
+                        settings=quick_score_settings,  # Use isolated settings WITHOUT function calling
+                        # NOTE: NOT passing kernel to prevent function calling from triggering
                     )
                     latency_ms = (time.time() - llm_start_time) * 1000
-                    
+
                     result_str = str(result)
-                    # Note: kernel doesn't expose token counts directly
-                    # Observatory will estimate these
-                    prompt_tokens = estimate_tokens(full_prompt)
-                    completion_tokens = estimate_tokens(result_str)
+
+                    # DEBUG LOGGING: See what we got back
+                    logger.info(f"[QUICK_SCORE] === LLM RESPONSE ===")
+                    logger.info(f"[QUICK_SCORE] Raw response (first 500 chars):\n{result_str[:500]}")
+
+                    # Extract token usage from metadata
+                    if hasattr(result, 'metadata') and result.metadata:
+                        usage = result.metadata.get('usage')
+                        if usage:
+                            if hasattr(usage, 'prompt_tokens'):
+                                prompt_tokens = usage.prompt_tokens or 0
+                                completion_tokens = usage.completion_tokens or 0
+                            elif isinstance(usage, dict):
+                                prompt_tokens = usage.get('prompt_tokens', 0)
+                                completion_tokens = usage.get('completion_tokens', 0)
+
+                    # Fallback to estimation if not available
+                    if not prompt_tokens:
+                        prompt_tokens = estimate_tokens(optimized_prompt + user_message)
+                    if not completion_tokens:
+                        completion_tokens = estimate_tokens(result_str)
 
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 7: Detect streaming candidates
@@ -1205,7 +1253,7 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                         latency_ms=latency_ms,
                         completion_tokens=completion_tokens,
                     )
-                    
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 8: Cache the response
                     # ═══════════════════════════════════════════════════════════════
@@ -1570,7 +1618,12 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                         operation=operation,
                         default_prompt=system_prompt
                     )
-                    
+                    # Passthrough: if optimizer returns None, use the original system_prompt
+                    if optimized_prompt is None:
+                        optimized_prompt = system_prompt
+                    if max_tokens_limit is None:
+                        max_tokens_limit = 2500  # Default for deep analysis
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 4: Get routed model
                     # ═══════════════════════════════════════════════════════════════
@@ -1589,29 +1642,71 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                         system_prompt=optimized_prompt,
                         system_prompt_tokens=estimate_tokens(optimized_prompt),
                     )
-                    
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 6: Make LLM call (use optimized values)
                     # ═══════════════════════════════════════════════════════════════
                     # Redefine full_prompt with optimized prompt for caching
                     full_prompt = f"{optimized_prompt}\n\n{user_message}"
-                    
-                    # Use kernel (BASELINE - this was working)
+
+                    # Make LLM call using chat completion
+                    from semantic_kernel.contents import ChatHistory
+                    from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+                        AzureChatPromptExecutionSettings,
+                    )
+
+                    deep_analysis_history = ChatHistory()
+                    deep_analysis_history.add_system_message(optimized_prompt)
+                    deep_analysis_history.add_user_message(user_message)
+
+                    # DEBUG LOGGING: See what's being sent to the LLM
+                    logger.info(f"[DEEP_ANALYSIS] === LLM REQUEST for job: {job.get('title', 'Unknown')} ===")
+                    logger.info(f"[DEEP_ANALYSIS] System prompt (first 300 chars):\n{optimized_prompt[:300]}...")
+                    logger.info(f"[DEEP_ANALYSIS] User message (first 200 chars):\n{user_message[:200]}...")
+                    logger.info(f"[DEEP_ANALYSIS] History has {len(deep_analysis_history.messages)} messages:")
+                    for i, msg in enumerate(deep_analysis_history.messages):
+                        role = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
+                        content_preview = str(msg.content)[:150].replace('\n', ' ')
+                        logger.info(f"[DEEP_ANALYSIS]   [{i}] {role}: {content_preview}...")
+
+                    # Create ISOLATED execution settings WITHOUT function calling
+                    # This prevents the kernel's global system prompt from interfering
+                    deep_analysis_settings = AzureChatPromptExecutionSettings()
+                    deep_analysis_settings.max_tokens = 2500
+                    deep_analysis_settings.temperature = 0.5
+                    # NO function_choice_behavior - we want pure completion, not tool calling
+
                     llm_start_time = time.time()
-                    result = await self.kernel.invoke_prompt(
-                        prompt=optimized_prompt,
-                        user_message=user_message,
-                        max_tokens=max_tokens_limit,
-                        temperature=0.5,
+                    result = await self.chat_completion.get_chat_message_content(
+                        chat_history=deep_analysis_history,
+                        settings=deep_analysis_settings,  # Use isolated settings WITHOUT function calling
+                        # NOTE: NOT passing kernel to prevent function calling from triggering
                     )
                     latency_ms = (time.time() - llm_start_time) * 1000
-                    
+
                     result_str = str(result)
-                    # Note: kernel doesn't expose token counts directly
-                    # Observatory will estimate these
-                    prompt_tokens = estimate_tokens(full_prompt)
-                    completion_tokens = estimate_tokens(result_str)
-                    
+
+                    # DEBUG LOGGING: See what we got back
+                    logger.info(f"[DEEP_ANALYSIS] === LLM RESPONSE ===")
+                    logger.info(f"[DEEP_ANALYSIS] Raw response (first 500 chars):\n{result_str[:500]}")
+
+                    # Extract token usage from metadata
+                    if hasattr(result, 'metadata') and result.metadata:
+                        usage = result.metadata.get('usage')
+                        if usage:
+                            if hasattr(usage, 'prompt_tokens'):
+                                prompt_tokens = usage.prompt_tokens or 0
+                                completion_tokens = usage.completion_tokens or 0
+                            elif isinstance(usage, dict):
+                                prompt_tokens = usage.get('prompt_tokens', 0)
+                                completion_tokens = usage.get('completion_tokens', 0)
+
+                    # Fallback to estimation if not available
+                    if not prompt_tokens:
+                        prompt_tokens = estimate_tokens(optimized_prompt + user_message)
+                    if not completion_tokens:
+                        completion_tokens = estimate_tokens(result_str)
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 7: Detect streaming candidates
                     # ═══════════════════════════════════════════════════════════════

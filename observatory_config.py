@@ -571,6 +571,11 @@ logger.info(f"   Note: A/B testing works in both baseline and optimized phases")
 
 # Prompt variant configuration
 PROMPT_VARIANTS = {
+    "passthrough": {
+        "content": None,  # None = use the default_prompt passed to get_optimized_prompt()
+        "max_tokens": None,  # None = no limit override
+        "description": "Passthrough - use the plugin's own task-specific prompt (for scoring, SQL, etc.)"
+    },
     "simple": {
         "content": "You are a helpful career advisor. Provide concise responses.",  # Placeholder - replace with actual
         "max_tokens": 150,
@@ -590,24 +595,26 @@ PROMPT_VARIANTS = {
 
 # Map operations to complexity levels
 OPERATION_COMPLEXITY = {
-    # Simple operations (use 50-token prompt)
-    "quick_score_job": "simple",
+    # Passthrough operations - plugins have their own task-specific prompts
+    # These should NOT be replaced by generic prompts
+    "quick_score_job": "passthrough",      # ResumeMatchingPlugin - needs JSON scoring format
+    "deep_analyze_job": "passthrough",     # ResumeMatchingPlugin - needs semantic analysis format
+    "deep_analyze_with_guidance": "passthrough",
+    "critique_match": "passthrough",
+    "refine_analysis": "passthrough",
+    "generate_sql": "passthrough",         # QueryDatabasePlugin - needs schema + SQL syntax
+    "query_database": "passthrough",
+    "improve_bullet": "passthrough",       # ResumeTailoringPlugin - needs tailoring instructions
+    "tailor_resume": "passthrough",
+    "generate_change_report": "passthrough",
+
+    # Simple operations (use compressed prompt) - listing/fetching only
     "list_resumes": "simple",
     "find_jobs": "simple",
     "get_job_details": "simple",
     "get_saved_jobs": "simple",
-    
-    # Medium operations (use 200-token prompt)
-    "generate_sql": "medium",
-    "improve_bullet": "medium",
-    "query_database": "medium",
-    "generate_change_report": "medium",
-    
-    # Complex operations (use full prompt)
-    "deep_analyze_job": "complex",
-    "deep_analyze_with_guidance": "complex",
-    "critique_match": "complex",
-    "refine_analysis": "complex",
+
+    # Complex operations (use full Career Copilot prompt) - main chat flow
     "streamlit_chat": "complex",
     "cli_chat_message": "complex",
 }

@@ -54,8 +54,8 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('openai').setLevel(logging.WARNING)
 
 # Keep plugin activity visible
-# logging.getLogger('agents.plugins').setLevel(logging.INFO)
-# logging.getLogger('ResumeMatchingPlugin').setLevel(logging.INFO)
+logging.getLogger('agents.plugins').setLevel(logging.INFO)
+logging.getLogger('agents.plugins.ResumeMatchingPlugin').setLevel(logging.INFO)
 logging.getLogger('JobPlugin').setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)

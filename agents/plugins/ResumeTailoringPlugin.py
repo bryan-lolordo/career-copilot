@@ -271,7 +271,12 @@ Required JSON format:
                         operation=operation,
                         default_prompt=system_prompt
                     )
-                    
+                    # Passthrough: if optimizer returns None, use the original system_prompt
+                    if optimized_prompt is None:
+                        optimized_prompt = system_prompt
+                    if max_tokens_limit is None:
+                        max_tokens_limit = 1000  # Default for resume tailoring
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 4: Get routed model
                     # ═══════════════════════════════════════════════════════════════

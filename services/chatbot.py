@@ -706,7 +706,7 @@ class CareerCopilotChatbot:
 
 def get_kernel():
     """Get the global kernel instance for reuse across pages."""
-    return kernel
+    return kernel, chat_completion
 
 
 def get_database_service():
