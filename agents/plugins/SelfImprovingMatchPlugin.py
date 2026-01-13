@@ -1,9 +1,11 @@
 # agents/plugins/SelfImprovingMatchPlugin.py
 """
 Self-Improving Match Plugin - Career Copilot
-UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
+UPDATED: Complete Observatory integration with two-phase system
 
 AI reviews and improves its own matching analysis through iterative refinement.
+Makes multiple LLM calls per workflow, so tracking is simplified to focus on
+the iterative process rather than optimization.
 """
 
 from semantic_kernel.functions import kernel_function
@@ -14,27 +16,40 @@ import os
 import time
 import uuid
 
-# Observatory Integration - Complete imports
+# ═════════════════════════════════════════════════════════════════════════
+# OBSERVATORY INTEGRATION - STANDARDIZED IMPORT BLOCK FOR LLM-MAKING PLUGINS
+# ═════════════════════════════════════════════════════════════════════════
+# NOTE: Import ALL optimization components for consistency, even if not all
+# steps are used. This creates a standard template for any LLM-making code.
 from observatory_config import (
-    start_session,
-    end_session,
+    # Main tracking
     track_llm_call,
+    
+    # Optimization components (10-step pattern - import ALL for consistency)
+    cache,                    # Step 1: Exact match caching
+    semantic_cache,          # Step 2: Semantic similarity caching
+    prefix_cache,            # Step 5: Prefix cache detection
+    router,                  # Step 4: Model routing
+    prompt_optimizer,        # Step 3: Prompt compression
+    streaming_detector,      # Step 7: Streaming detection
+    batch_detector,          # Step 11: Batch detection
+    parallel_detector,       # (Available for parallel execution)
+    judge,                   # Step 9: Quality evaluation
+    
+    # Config constants
+    DEFAULT_MODEL,
+    CURRENT_PHASE,
+    
+    # Data models
+    PromptMetadata,
+    
+    # Helper functions
     create_prompt_metadata,
     create_prompt_breakdown,
     create_routing_decision,
     create_cache_metadata,
-    judge,
-    DEFAULT_MODEL,
-    PromptMetadata,
-    ModelConfig,
-    StreamingMetrics,
-    ExperimentMetadata,
-    ErrorDetails,
-    classify_error,
-    generate_cache_key,
-    calculate_prefix_hash,
     estimate_tokens,
-    calculate_complexity_score,
+    classify_error,
 )
 
 # Configure logging
@@ -48,41 +63,19 @@ CRITIQUE_MATCH_VERSION = "1.0.0"
 GENERATE_REFINEMENTS_VERSION = "1.0.0"
 REFINE_ANALYSIS_VERSION = "1.0.0"
 
-# Create PromptMetadata for self-improving operations
-DEEP_ANALYZE_GUIDANCE_META = create_prompt_metadata(
-    template_id="self_improving_deep_analyze_guidance",
-    version=DEEP_ANALYZE_GUIDANCE_VERSION,
-    compressible_sections=["RETURN FORMAT", "PREVIOUS ANALYSIS"],
-    optimization_flags={"iterative_refinement": True},
-    config_version="1.0"
-) if PromptMetadata else None
-
-CRITIQUE_MATCH_META = create_prompt_metadata(
-    template_id="self_improving_critique_match",
-    version=CRITIQUE_MATCH_VERSION,
-    compressible_sections=["Review This Match For"],
-    optimization_flags={"quality_control": True},
-    config_version="1.0"
-) if PromptMetadata else None
-
-GENERATE_REFINEMENTS_META = create_prompt_metadata(
-    template_id="self_improving_generate_refinements",
-    version=GENERATE_REFINEMENTS_VERSION,
-    compressible_sections=["Current Analysis Issues"],
-    optimization_flags={"guidance_generation": True},
-    config_version="1.0"
-) if PromptMetadata else None
-
-REFINE_ANALYSIS_META = create_prompt_metadata(
-    template_id="self_improving_refine_analysis",
-    version=REFINE_ANALYSIS_VERSION,
-    compressible_sections=["PREVIOUS ANALYSIS", "YOUR TASK"],
-    optimization_flags={"refinement_mode": True},
-    config_version="1.0"
-) if PromptMetadata else None
-
-
 class SelfImprovingMatchPlugin:
+    """
+    Plugin for iterative self-improvement of job-resume matches.
+    
+    Implementation Note: This plugin uses SIMPLIFIED tracking rather than
+    the full 10-step optimization pattern because:
+    - Iterative refinement creates unique prompts each iteration
+    - Caching has limited value (different job-resume pairs)
+    - Focus is on the refinement workflow, not individual call optimization
+    
+    However, all optimization components are imported for consistency and
+    future flexibility.
+    """
     
     def __init__(self, kernel, matching_plugin, context=None, memory=None):
         """
@@ -90,6 +83,7 @@ class SelfImprovingMatchPlugin:
             kernel: Semantic Kernel instance
             matching_plugin: The ResumeMatchingPlugin instance
             context: Shared ConversationContext instance
+            memory: ConversationMemory instance for tracking
         """
         self.kernel = kernel
         self.matching_plugin = matching_plugin
@@ -120,7 +114,7 @@ class SelfImprovingMatchPlugin:
         4. Return updated match
         """
         
-        print(f"\n🤖 Self-Improving Single Match: Resume {resume_id} + Job {job_id}")
+        logger.info(f"🤖 Self-Improving Single Match: Resume {resume_id} + Job {job_id}")
         
         db_service = self.matching_plugin.db
         
@@ -168,14 +162,14 @@ class SelfImprovingMatchPlugin:
         
         while iteration < max_iterations:
             iteration += 1
-            print(f"\n📊 === Iteration {iteration}/{max_iterations} ===")
+            logger.info(f"📊 === Iteration {iteration}/{max_iterations} ===")
             
             # STEP 1: Deep analyze with accumulated refinement guidance
-            print(f"   ▶️ Analyzing match...")
+            logger.info(f"▶️ Analyzing match...")
             
             if refinement_guidance:
                 guidance_text = "\n".join([f"- {item}" for item in refinement_guidance])
-                print(f"   📝 Applying {len(refinement_guidance)} refinements...")
+                logger.info(f"📝 Applying {len(refinement_guidance)} refinements...")
             else:
                 guidance_text = ""
             
@@ -191,36 +185,36 @@ class SelfImprovingMatchPlugin:
                 not analysis.get('_parsing_failed') and
                 current_analysis and 
                 current_analysis['score'] > 0):
-                print(f"   ⚠️ Analysis completely failed, keeping previous analysis")
+                logger.warning(f"⚠️ Analysis completely failed, keeping previous analysis")
                 analysis = current_analysis
             elif analysis.get('_parsing_failed'):
-                print(f"   ⚠️ Partial parsing - extracted score: {analysis['score']}")
+                logger.warning(f"⚠️ Partial parsing - extracted score: {analysis['score']}")
             
             current_analysis = analysis
-            print(f"   ✅ Score: {analysis['score']}/100")
+            logger.info(f"✅ Score: {analysis['score']}/100")
             
             # Track best analysis so far
             if analysis['score'] > best_score:
                 best_analysis = current_analysis.copy()
                 best_score = analysis['score']
-                print(f"   🏆 New best score: {best_score}/100")
+                logger.info(f"🏆 New best score: {best_score}/100")
             
             # STEP 2: AI Critic reviews this single match
-            print(f"   🔍 AI Critic reviewing...")
+            logger.info(f"🔍 AI Critic reviewing...")
             
             critique = await self._critique_single_match(analysis, resume, job)
             
             try:
                 critique_data = json.loads(critique)
             except:
-                print("   ⚠️ Critique parsing failed")
+                logger.warning("⚠️ Critique parsing failed")
                 break
             
             quality_score = critique_data.get('overall_quality', 0)
             issues = critique_data.get('issues', [])
             
-            print(f"   📊 Quality: {quality_score}/100")
-            print(f"   ⚠️ Issues: {len(issues)}")
+            logger.info(f"📊 Quality: {quality_score}/100")
+            logger.info(f"⚠️ Issues: {len(issues)}")
             
             # Log iteration
             iteration_log = {
@@ -239,15 +233,15 @@ class SelfImprovingMatchPlugin:
             
             # STEP 3: Check if acceptable
             if quality_score >= 85 and len(issues) == 0:
-                print(f"   ✅ Quality acceptable!")
+                logger.info(f"✅ Quality acceptable!")
                 break
             
             if iteration >= max_iterations:
-                print(f"   ⏰ Max iterations reached")
+                logger.info(f"⏰ Max iterations reached")
                 break
             
             # STEP 4: Generate refinements for NEXT iteration
-            print(f"   🔧 Generating refinements...")
+            logger.info(f"🔧 Generating refinements...")
             
             refinements = await self._generate_refinements_for_single_match(
                 critique_data,
@@ -268,17 +262,17 @@ class SelfImprovingMatchPlugin:
                 for focus in focus_areas:
                     refinement_guidance.append(f"Focus: {focus}")
                 
-                print(f"   📝 Added {len(adjustments)} adjustments for next iteration")
+                logger.info(f"📝 Added {len(adjustments)} adjustments for next iteration")
                 
                 refinement_log[-1]['refinements'] = adjustments
                 
             except Exception as e:
-                print(f"   ⚠️ Refinement parsing failed: {e}")
+                logger.warning(f"⚠️ Refinement parsing failed: {e}")
                 break
     
         # FINAL: Save updated match using BEST analysis
-        print(f"\n💾 Saving updated match...")
-        print(f"   🏆 Using best analysis with score: {best_score}/100")
+        logger.info(f"💾 Saving updated match...")
+        logger.info(f"🏆 Using best analysis with score: {best_score}/100")
         
         if best_analysis:
             detailed_analysis_dict = {
@@ -296,7 +290,7 @@ class SelfImprovingMatchPlugin:
             }
             
             db_service.save_match(
-                resume_id=resume_id_int,  # ← Use the integer we extracted earlier
+                resume_id=resume_id_int,
                 job_id=job_id_int,
                 score=best_analysis['score'],
                 reason=best_analysis.get('reason', 'Improved analysis'),
@@ -304,7 +298,7 @@ class SelfImprovingMatchPlugin:
                 detailed_analysis=json.dumps(detailed_analysis_dict)
             )
             
-            print(f"   ✅ Match updated in database")
+            logger.info(f"✅ Match updated in database")
         
         return json.dumps({
             'final_score': best_score,
@@ -391,6 +385,7 @@ Format:
 }}"""
 
         full_prompt = f"{system_prompt}\n\n{user_message}"
+        request_id = str(uuid.uuid4())
 
         llm_start_time = time.time()
         result = await self.kernel.invoke_prompt(full_prompt)
@@ -400,104 +395,54 @@ Format:
         prompt_tokens = estimate_tokens(full_prompt)
         completion_tokens = estimate_tokens(result_str)
         
-        # Create prompt breakdown for Tier 2
+        # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
             system_prompt_tokens=estimate_tokens(system_prompt),
             user_message=user_message,
             user_message_tokens=estimate_tokens(user_message),
-        ) if create_prompt_breakdown else None
+        )
         
-        # LLM Judge evaluation 
+        # LLM Judge evaluation
         quality_eval = await judge.maybe_evaluate(
             operation="deep_analyze_with_guidance",
             prompt=full_prompt[:5000],
             response=result_str[:5000],
-            llm_client=self.kernel, 
-            conversation_id=self.memory.conversation_id if self.memory else None,
-            turn_number=self.memory.turn_number if self.memory else None, 
+            llm_client=self.kernel,
         )
         
-        # Tier 3: Routing decision (placeholder - ready for optimization)
-        routing_decision = create_routing_decision(
-            chosen_model=DEFAULT_MODEL,
-            alternative_models=["gpt-4o", "gpt-4o-mini"],
-            reasoning="Deep analysis - complex task requiring premium model",
-            complexity_score=0.8
-        ) if create_routing_decision else None
-        
-        # Tier 3: Cache metadata (placeholder - ready for optimization)
-        cache_metadata = create_cache_metadata(
-            cache_hit=False,
-            cache_key=generate_cache_key("deep_analyze_with_guidance", resume_text[:500], job.get('id')),
-            cache_cluster_id="deep_analysis"
-        ) if create_cache_metadata else None
-        
-        # Track in Observatory - COMPLETE with all tiers
+        # Track with phase metadata
         track_llm_call(
-            # Core metrics (Tier 1)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name="SelfImprovingMatch",
-            agent_role="analyst",  # Added: agent role
+            agent_role="analyst",
             operation="deep_analyze_with_guidance",
-            success=True,  # Added: explicit success
-            
-            # Prompt analysis (Tier 2)
+            success=True,
             system_prompt=system_prompt,
             user_message=user_message[:5000],
             response_text=result_str[:5000],
-            prompt_metadata=DEEP_ANALYZE_GUIDANCE_META,
-            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
-            
-            # Quality evaluation (Tier 2)
+            prompt_breakdown=prompt_breakdown,
             quality_evaluation=quality_eval,
-            
-            # Optimization tracking (Tier 3)
-            routing_decision=routing_decision,  # Added: routing
-            cache_metadata=cache_metadata,  # Added: cache
-            
-            # A/B Testing support (Tier 3)
-            prompt_variant_id=None,  # Added: ready for A/B tests
-            test_dataset_id=None,  # Added: ready for test runs
-            
-            # NEW: Conversation linking
+            temperature=0.7,
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-
-            # NEW: Model configuration
-            temperature=0.7,  # Creative writing for resume improvement
-            max_tokens=None,  # Keep None to see inefficiencies
-            
-            # NEW: Token breakdown (top-level)
-            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
-            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
-            
-            # NEW: Streaming
-            time_to_first_token_ms=None,
-            
-            # NEW: Prefix hash (system prompt + resume static, job varies)
-            prompt_prefix_hash=calculate_prefix_hash(system_prompt, resume_text[:2000]),
-                
-            # NEW: Observability
+            request_id=request_id,
+            trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
-            
-            # Metadata
             metadata={
+                "phase": CURRENT_PHASE,  # ← CRITICAL
                 "job_id": job.get('id'),
                 "job_title": job.get('title', 'Unknown'),
                 "iteration_mode": "initial",
                 "has_guidance": bool(guidance),
                 "judged": quality_eval is not None,
-                "conversation_memory": self.memory,
-                "execution_settings": self.exec_settings
             }
         )
 
-        print(f"   📊 Tracked deep analysis: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+        logger.info(f"📊 Tracked deep analysis: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
         
         # Parse JSON
         if '```json' in result_str:
@@ -618,6 +563,7 @@ Company: {job.get('company', 'N/A')}
 {job.get('description', 'N/A')[:2500]}"""
 
         full_prompt = f"{system_prompt}\n\n{user_message}"
+        request_id = str(uuid.uuid4())
 
         llm_start_time = time.time()
         result = await self.kernel.invoke_prompt(full_prompt)
@@ -627,104 +573,54 @@ Company: {job.get('company', 'N/A')}
         prompt_tokens = estimate_tokens(full_prompt)
         completion_tokens = estimate_tokens(result_str)
         
-        # Create prompt breakdown for Tier 2
+        # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
             system_prompt_tokens=estimate_tokens(system_prompt),
             user_message=user_message,
             user_message_tokens=estimate_tokens(user_message),
-        ) if create_prompt_breakdown else None
-        
-        # LLM Judge evaluation 
-        quality_eval = await judge.maybe_evaluate(
-            operation="deep_analyze_with_guidance",
-            prompt=full_prompt[:5000],
-            response=result_str[:5000],
-            llm_client=self.kernel, 
-            conversation_id=self.memory.conversation_id if self.memory else None,
-            turn_number=self.memory.turn_number if self.memory else None, 
         )
         
-        # Tier 3: Routing decision (placeholder)
-        routing_decision = create_routing_decision(
-            chosen_model=DEFAULT_MODEL,
-            alternative_models=["gpt-4o", "gpt-4o-mini"],
-            reasoning="Refinement analysis - complex iterative task",
-            complexity_score=0.75
-        ) if create_routing_decision else None
+        # LLM Judge evaluation
+        quality_eval = await judge.maybe_evaluate(
+            operation="refine_analysis",
+            prompt=full_prompt[:5000],
+            response=result_str[:5000],
+            llm_client=self.kernel,
+        )
         
-        # Tier 3: Cache metadata (placeholder)
-        cache_metadata = create_cache_metadata(
-            cache_hit=False,
-            cache_key=generate_cache_key("refine_analysis", resume_text[:500], job.get('id')),
-            cache_cluster_id="refinement_analysis"
-        ) if create_cache_metadata else None
-        
-        # Track in Observatory - COMPLETE with all tiers
+        # Track with phase metadata
         track_llm_call(
-            # Core metrics (Tier 1)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name="SelfImprovingMatch",
-            agent_role="analyst",  # Added: agent role
+            agent_role="analyst",
             operation="refine_analysis",
-            success=True,  # Added: explicit success
-            
-            # Prompt analysis (Tier 2)
+            success=True,
             system_prompt=system_prompt,
             user_message=user_message[:5000],
             response_text=result_str[:5000],
-            prompt_metadata=REFINE_ANALYSIS_META,
-            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
-            
-            # Quality evaluation (Tier 2)
+            prompt_breakdown=prompt_breakdown,
             quality_evaluation=quality_eval,
-            
-            # Optimization tracking (Tier 3)
-            routing_decision=routing_decision,  # Added: routing
-            cache_metadata=cache_metadata,  # Added: cache
-            
-            # A/B Testing support (Tier 3)
-            prompt_variant_id=None,  # Added: ready for A/B tests
-            test_dataset_id=None,  # Added: ready for test runs
-            
-            # NEW: Conversation linking
+            temperature=0.5,
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-            
-            # NEW: Model configuration
-            temperature=0.5,  # Balanced analysis
-            max_tokens=None,
-            
-            # NEW: Token breakdown (top-level)
-            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
-            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
-            
-            # NEW: Streaming
-            time_to_first_token_ms=None,
-            
-            # NEW: Prefix hash
-            prompt_prefix_hash=calculate_prefix_hash(system_prompt, resume_text[:2000]),
-            
-            # NEW: Observability
+            request_id=request_id,
+            trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
-            
-            # Metadata
             metadata={
+                "phase": CURRENT_PHASE,  # ← CRITICAL
                 "job_id": job.get('id'),
                 "job_title": job.get('title', 'Unknown'),
                 "previous_score": existing_score,
                 "iteration_mode": "refinement",
                 "judged": quality_eval is not None,
-                "conversation_memory": self.context.memory if hasattr(self.context, 'memory') else None,
-                "execution_settings": self.exec_settings
             }
         )
         
-        print(f"   📊 Tracked refinement: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+        logger.info(f"📊 Tracked refinement: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
         
         # Parse JSON
         if '```json' in result_str:
@@ -763,7 +659,7 @@ Company: {job.get('company', 'N/A')}
             }
         
         except Exception as e:
-            print(f"   ❌ Refinement parsing failed: {e}")
+            logger.error(f"❌ Refinement parsing failed: {e}")
             return previous_analysis
 
     # =========================================================================
@@ -810,6 +706,7 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
 }}"""
 
         full_prompt = f"{system_prompt}\n\n{user_message}"
+        request_id = str(uuid.uuid4())
 
         llm_start_time = time.time()
         result = await self.kernel.invoke_prompt(full_prompt)
@@ -819,104 +716,53 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
         prompt_tokens = estimate_tokens(full_prompt)
         completion_tokens = estimate_tokens(result_str)
         
-        # Create prompt breakdown for Tier 2
+        # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
             system_prompt_tokens=estimate_tokens(system_prompt),
             user_message=user_message,
             user_message_tokens=estimate_tokens(user_message),
-        ) if create_prompt_breakdown else None
+        )
         
-        # LLM Judge evaluation 
+        # LLM Judge evaluation
         quality_eval = await judge.maybe_evaluate(
             operation="critique_match",
             prompt=full_prompt,
             response=result_str,
-            llm_client=self.kernel, 
-            conversation_id=self.memory.conversation_id if self.memory else None,
-            turn_number=self.memory.turn_number if self.memory else None,
+            llm_client=self.kernel,
         )
         
-        # Tier 3: Routing decision (placeholder)
-        routing_decision = create_routing_decision(
-            chosen_model=DEFAULT_MODEL,
-            alternative_models=["gpt-4o", "gpt-4o-mini"],
-            reasoning="Quality review - medium complexity",
-            complexity_score=0.6
-        ) if create_routing_decision else None
-        
-        # Tier 3: Cache metadata (placeholder)
-        cache_metadata = create_cache_metadata(
-            cache_hit=False,
-            cache_key=generate_cache_key("critique_match", job.get('id'), analysis.get('score')),
-            cache_cluster_id="critique"
-        ) if create_cache_metadata else None
-        
-        # Track in Observatory - COMPLETE with all tiers
+        # Track with phase metadata
         track_llm_call(
-            # Core metrics (Tier 1)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name="SelfImprovingMatch",
-            agent_role="reviewer",  # Added: agent role
+            agent_role="reviewer",
             operation="critique_match",
-            success=True,  # Added: explicit success
-            
-            # Prompt analysis (Tier 2)
+            success=True,
             system_prompt=system_prompt,
             user_message=user_message,
             response_text=result_str,
-            prompt_metadata=CRITIQUE_MATCH_META,
-            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
-            
-            # Quality evaluation (Tier 2)
+            prompt_breakdown=prompt_breakdown,
             quality_evaluation=quality_eval,
-            
-            # Optimization tracking (Tier 3)
-            routing_decision=routing_decision,  # Added: routing
-            cache_metadata=cache_metadata,  # Added: cache
-            
-            # A/B Testing support (Tier 3)
-            prompt_variant_id=None,  # Added: ready for A/B tests
-            test_dataset_id=None,  # Added: ready for test runs
-            
-            # NEW: Model configuration
-            temperature=None,
-            max_tokens=None,
-            
-            # NEW: Token breakdown (top-level)
-            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
-            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
-            
-            # NEW: Streaming
-            time_to_first_token_ms=None,
-            
-            # NEW: Prefix hash
-            prompt_prefix_hash=calculate_prefix_hash(system_prompt),
-
-            # NEW: Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=str(uuid.uuid4()),
-            
-            # NEW: Observability
+            request_id=request_id,
+            trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
-            
-            # Metadata
             metadata={
+                "phase": CURRENT_PHASE,  # ← CRITICAL
                 "job_id": job.get('id'),
                 "job_title": job.get('title', 'Unknown'),
                 "match_score": analysis.get('score', 0),
                 "num_matched_bullets": len(matched_bullets),
                 "judged": quality_eval is not None,
-                "conversation_memory": self.memory,
-                "execution_settings": self.exec_settings
             }
         )
         
-        print(f"   📊 Tracked critique: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+        logger.info(f"📊 Tracked critique: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
         
         # Clean JSON
         if '```json' in result_str:
@@ -969,6 +815,7 @@ CRITICAL: Return ONLY valid JSON."""
 }}"""
 
         full_prompt = f"{system_prompt}\n\n{user_message}"
+        request_id = str(uuid.uuid4())
 
         llm_start_time = time.time()
         result = await self.kernel.invoke_prompt(full_prompt)
@@ -978,93 +825,46 @@ CRITICAL: Return ONLY valid JSON."""
         prompt_tokens = estimate_tokens(full_prompt)
         completion_tokens = estimate_tokens(result_str)
         
-        # Create prompt breakdown for Tier 2
+        # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
             system_prompt_tokens=estimate_tokens(system_prompt),
             user_message=user_message,
             user_message_tokens=estimate_tokens(user_message),
-        ) if create_prompt_breakdown else None
+        )
         
-        # Tier 3: Routing decision (placeholder)
-        routing_decision = create_routing_decision(
-            chosen_model=DEFAULT_MODEL,
-            alternative_models=["gpt-4o", "gpt-4o-mini"],
-            reasoning="Simple guidance generation - low complexity",
-            complexity_score=0.3
-        ) if create_routing_decision else None
+        # NO judge for this low-value operation
         
-        # Tier 3: Cache metadata (placeholder)
-        cache_metadata = create_cache_metadata(
-            cache_hit=False,
-            cache_key=generate_cache_key("generate_refinements", job.get('id'), analysis.get('score')),
-            cache_cluster_id="refinements"
-        ) if create_cache_metadata else None
-        
-        # Track in Observatory - COMPLETE with all tiers (NO JUDGE - low value)
+        # Track with phase metadata (no quality evaluation for low-value op)
         track_llm_call(
-            # Core metrics (Tier 1)
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             agent_name="SelfImprovingMatch",
-            agent_role="planner",  # Added: agent role
+            agent_role="planner",
             operation="generate_refinements",
-            success=True,  # Added: explicit success
-            
-            # Prompt analysis (Tier 2)
+            success=True,
             system_prompt=system_prompt,
             user_message=user_message,
             response_text=result_str,
-            prompt_metadata=GENERATE_REFINEMENTS_META,
-            prompt_breakdown=prompt_breakdown,  # Added: token breakdown
-            
-            # No quality evaluation for this low-value operation
-            quality_evaluation=None,
-            
-            # Optimization tracking (Tier 3)
-            routing_decision=routing_decision,  # Added: routing
-            cache_metadata=cache_metadata,  # Added: cache
-            
-            # A/B Testing support (Tier 3)
-            prompt_variant_id=None,  # Added: ready for A/B tests
-            test_dataset_id=None,  # Added: ready for test runs
-            
-            # NEW: Model configuration
-            temperature=None,
-            max_tokens=None,
-
-            # NEW: Conversation linking
+            prompt_breakdown=prompt_breakdown,
+            quality_evaluation=None,  # Low-value operation - no judge
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=str(uuid.uuid4()),
-            
-            # NEW: Token breakdown (top-level)
-            system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
-            user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
-            
-            # NEW: Streaming
-            time_to_first_token_ms=None,
-            
-            # NEW: Prefix hash
-            prompt_prefix_hash=calculate_prefix_hash(system_prompt),
-            
-            # NEW: Observability
+            request_id=request_id,
+            trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
-            
-            # Metadata
             metadata={
+                "phase": CURRENT_PHASE,  # ← CRITICAL
                 "job_id": job.get('id'),
                 "job_title": job.get('title', 'Unknown'),
                 "match_score": analysis.get('score', 0),
                 "num_weaknesses": len(critique.get('weaknesses', [])),
-                "conversation_memory": self.memory,
-                "execution_settings": self.exec_settings
             }
         )
         
-        print(f"   📊 Tracked refinement generation: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+        logger.info(f"📊 Tracked refinement generation: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
         
         # Clean JSON
         if '```json' in result_str:

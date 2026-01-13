@@ -1,7 +1,10 @@
 # agents/plugins/QueryDatabasePlugin.py
 """
 Database Query Plugin - Career Copilot
-UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
+UPDATED: Complete Observatory integration with two-phase system
+
+Special plugin: Makes LLM calls for SQL generation, so implements
+full optimization pattern (caching, routing, etc.) for that operation.
 """
 
 from semantic_kernel.functions import kernel_function
@@ -16,28 +19,35 @@ import uuid
 
 from services.db import DB_PATH
 
-# Observatory Integration - Complete imports
+# Observatory Integration - CORRECT imports (only what exists in observatory_config.py)
 from observatory_config import (
-    start_session,
-    end_session,
+    # Main tracking
     track_llm_call,
-    create_prompt_metadata,
+    
+    # Optimization components (import ALL for consistency)
+    cache,
+    semantic_cache,
+    prefix_cache,
+    router,
+    prompt_optimizer,
+    streaming_detector,
+    batch_detector,         
+    parallel_detector,      
+    judge,
+    
+    # Config constants
+    DEFAULT_MODEL,
+    CURRENT_PHASE,
+    
+    # Data models
+    PromptMetadata,
+    
+    # Helper functions
     create_prompt_breakdown,
     create_routing_decision,
     create_cache_metadata,
-    judge,
-    DEFAULT_MODEL,
-    PromptMetadata,
-    ModelConfig,
-    StreamingMetrics,
-    ExperimentMetadata,
-    ErrorDetails,
-    classify_error,
-    generate_cache_key,
-    semantic_cache,
-    calculate_prefix_hash,
     estimate_tokens,
-    calculate_complexity_score,
+    classify_error,
 )
 
 # Configure logging
@@ -48,19 +58,12 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 SQL_GENERATION_PROMPT_VERSION = "1.0.0"
 
-# Create PromptMetadata for SQL generation operations
-SQL_PROMPT_META = create_prompt_metadata(
-    template_id="database_query_sql_generation",
-    version=SQL_GENERATION_PROMPT_VERSION,
-    compressible_sections=["RULES"],
-    optimization_flags={"deterministic_sql": True},
-    config_version="1.0"
-) if PromptMetadata else None
-
-
 class DatabaseQueryPlugin:
     """
     Agentic plugin that allows the AI to query the database using natural language.
+    
+    Special Note: This plugin makes LLM calls for SQL generation, so it implements
+    the full two-phase optimization pattern for those operations.
     """
     
     def __init__(self, kernel, memory=None):
@@ -151,6 +154,9 @@ class DatabaseQueryPlugin:
         """
         Takes a natural language question, generates SQL, executes it safely,
         and returns the results.
+        
+        This function makes LLM calls for SQL generation, so it implements
+        the full 10-step optimization pattern.
         """
         
         # Build the SQL generation prompt
@@ -170,149 +176,243 @@ User Question: {question}
 
 SQL Query:"""
 
-        full_prompt = f"{system_prompt}\n\n{user_message}"
-
         try:
-            print(f"\n🤖 Generating SQL for question: '{question}'")
-            
-            # Get execution settings for tracking
-            from agents.semantic_kernel_setup import create_execution_settings
-            exec_settings = create_execution_settings()
-
-            # Track LLM call for SQL generation
-            llm_start_time = time.time()
+            logger.info(f"🤖 Generating SQL for question: '{question}'")
             
             # ═══════════════════════════════════════════════════════════════
-            # CHECK SEMANTIC CACHE FIRST
+            # STEP 1: Check exact cache
             # ═══════════════════════════════════════════════════════════════
-            cache_result = await semantic_cache.get(full_prompt, operation="generate_sql")
+            operation = "generate_sql"
+            cache_key_data = {"question": question, "schema_hash": hash(self.schema)}
             
-            if cache_result.hit:
-                # Cache HIT - use cached response
-                latency_ms = (time.time() - llm_start_time) * 1000
-                generated_sql = cache_result.response
-                prompt_tokens = 0  # No tokens used
+            cached_sql, cache_meta = cache.get(
+                operation=operation,
+                key_data=cache_key_data
+            )
+            
+            if cached_sql:  # None in baseline, actual SQL in optimized
+                logger.info(f"✅ Cache hit! Using cached SQL.")
+                generated_sql = cached_sql
+                latency_ms = 1.0  # Minimal latency
+                prompt_tokens = 0
                 completion_tokens = 0
-                cache_hit = True
-                cache_key = cache_result.cache_key
-                print(f"   ✅ Cache HIT ({cache_result.similarity:.1%} similar)")
-            else:
-                # Cache MISS - call LLM
-                result = await self.kernel.invoke_prompt(full_prompt)
-                latency_ms = (time.time() - llm_start_time) * 1000
-                generated_sql = str(result).strip()
-                prompt_tokens = estimate_tokens(full_prompt)
-                completion_tokens = estimate_tokens(generated_sql)
-                cache_hit = False
                 
-                # Store in cache for next time
-                cache_key = await semantic_cache.set(
-                    full_prompt, 
-                    generated_sql, 
-                    operation="generate_sql",
-                    metadata={"question": question}
+                # Track cache hit and skip to SQL execution
+                track_llm_call(
+                    operation=operation,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=1.0,
+                    success=True,
+                    response_text=generated_sql,
+                    cache_metadata=cache_meta,
+                    agent_name="DatabaseQuery",
+                    agent_role="analyst",
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+                    parent_call_id=self.memory.request_id if self.memory else None,
+                    request_id=str(uuid.uuid4()),
+                    trace_id=self.memory.conversation_id if self.memory else None,
+                    environment=os.getenv("ENVIRONMENT", "development"),
+                    metadata={
+                        "phase": CURRENT_PHASE,  # ← CRITICAL
+                        "cache_hit": True,
+                        "question": question[:200],
+                    }
                 )
-                print(f"   💾 Cached for future use")
+                
+                # Skip to SQL execution (after all the LLM steps)
+                # ... (will be after STEP 10)
+            
+            else:
+                # ═══════════════════════════════════════════════════════════════
+                # STEP 2: Check semantic cache (if available)
+                # ═══════════════════════════════════════════════════════════════
+                if semantic_cache:
+                    result = await semantic_cache.get(operation=operation, prompt=question)
+                    if result.hit:  # False in baseline, True in optimized if similar
+                        logger.info(f"✅ Semantic cache hit ({result.similarity:.1%} similar)!")
+                        generated_sql = result.response
+                        latency_ms = 1.0
+                        prompt_tokens = 0
+                        completion_tokens = 0
+                        
+                        # Track semantic cache hit and skip to SQL execution
+                        track_llm_call(
+                            operation=operation,
+                            prompt_tokens=0,
+                            completion_tokens=0,
+                            latency_ms=1.0,
+                            success=True,
+                            response_text=generated_sql,
+                            cache_metadata=create_cache_metadata(
+                                cache_hit=True,
+                                similarity_score=result.similarity
+                            ),
+                            agent_name="DatabaseQuery",
+                            agent_role="analyst",
+                            conversation_id=self.memory.conversation_id if self.memory else None,
+                            turn_number=self.memory.turn_number if self.memory else None,
+                            parent_call_id=self.memory.request_id if self.memory else None,
+                            request_id=str(uuid.uuid4()),
+                            trace_id=self.memory.conversation_id if self.memory else None,
+                            environment=os.getenv("ENVIRONMENT", "development"),
+                            metadata={
+                                "phase": CURRENT_PHASE,  # ← CRITICAL
+                                "semantic_cache_hit": True,
+                                "similarity": result.similarity,
+                                "question": question[:200],
+                            }
+                        )
+                        
+                        # Skip to SQL execution
+                        # ... (will be after STEP 10)
+                
+                # If no cache hit, proceed with LLM call
+                if not cached_sql and (not semantic_cache or not result.hit if semantic_cache else True):
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 3: Get optimized prompt and max_tokens
+                    # ═══════════════════════════════════════════════════════════════
+                    optimized_prompt, max_tokens_limit, prompt_meta = prompt_optimizer.get_optimized_prompt(
+                        operation=operation,
+                        default_prompt=system_prompt
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 4: Get routed model
+                    # ═══════════════════════════════════════════════════════════════
+                    routed_model, routing_meta = router.select(
+                        operation=operation,
+                        prompt=optimized_prompt + user_message,  # ✅ Added
+                        estimated_tokens=estimate_tokens(optimized_prompt + user_message),  # ✅ Changed
+                        complexity=0.3  # SQL generation is low complexity
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 5: Track prefix for prefix caching detection
+                    # ═══════════════════════════════════════════════════════════════
+                    prefix_cache.track_call(
+                        operation=operation,
+                        system_prompt=optimized_prompt,
+                        system_prompt_tokens=estimate_tokens(optimized_prompt),
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 6: Make LLM call (use optimized values)
+                    # ═══════════════════════════════════════════════════════════════
+                    full_prompt = f"{optimized_prompt}\n\n{user_message}"
+                    
+                    llm_start_time = time.time()
+                    result = await self.kernel.invoke_prompt(full_prompt)
+                    latency_ms = (time.time() - llm_start_time) * 1000
+                    
+                    generated_sql = str(result).strip()
+                    prompt_tokens = estimate_tokens(full_prompt)
+                    completion_tokens = estimate_tokens(generated_sql)
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 7: Detect streaming candidates
+                    # ═══════════════════════════════════════════════════════════════
+                    streaming_candidate = streaming_detector.check_call(
+                        operation=operation,
+                        latency_ms=latency_ms,
+                        completion_tokens=completion_tokens,
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 8: Cache the response
+                    # ═══════════════════════════════════════════════════════════════
+                    cache.set(
+                        operation=operation,
+                        key_data=cache_key_data,
+                        value=generated_sql
+                    )
+                    
+                    if semantic_cache:
+                        await semantic_cache.set(
+                            operation=operation,
+                            prompt=question,
+                            response=generated_sql
+                        )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 9: Create prompt breakdown and evaluate quality
+                    # ═══════════════════════════════════════════════════════════════
+                    prompt_breakdown = create_prompt_breakdown(
+                        system_prompt=optimized_prompt,
+                        system_prompt_tokens=estimate_tokens(optimized_prompt),
+                        user_message=user_message,
+                        user_message_tokens=estimate_tokens(user_message),
+                    )
+                    
+                    # LLM Judge evaluation
+                    quality_eval = await judge.maybe_evaluate(
+                        operation=operation,
+                        prompt=full_prompt,
+                        response=generated_sql,
+                        llm_client=self.kernel,
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 10: Track with Observatory (CRITICAL - INCLUDE PHASE)
+                    # ═══════════════════════════════════════════════════════════════
+                    track_llm_call(
+                        # Core metrics
+                        model_name=routed_model,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        latency_ms=latency_ms,
+                        agent_name="DatabaseQuery",
+                        agent_role="analyst",
+                        operation=operation,
+                        success=True,
+                        
+                        # Prompt content
+                        system_prompt=optimized_prompt,
+                        user_message=user_message,
+                        response_text=generated_sql,
+                        prompt_breakdown=prompt_breakdown,
+                        
+                        # Optimization tracking
+                        routing_decision=routing_meta,
+                        cache_metadata=None, 
+                        quality_evaluation=quality_eval,
+                        prompt_metadata=None,
+                        
+                        # Model configuration
+                        temperature=0.0,  # SQL generation should be deterministic
+                        max_tokens=max_tokens_limit,
+                        
+                        # Token breakdown
+                        system_prompt_tokens=estimate_tokens(optimized_prompt),
+                        user_message_tokens=estimate_tokens(user_message),
+                        
+                        # Conversation linking
+                        conversation_id=self.memory.conversation_id if self.memory else None,
+                        turn_number=self.memory.turn_number if self.memory else None,
+                        parent_call_id=self.memory.request_id if self.memory else None,
+                        request_id=str(uuid.uuid4()),
+                        
+                        # Observability
+                        trace_id=self.memory.conversation_id if self.memory else None,
+                        environment=os.getenv("ENVIRONMENT", "development"),
+                        
+                        # Metadata - CRITICAL: Include phase
+                        metadata={
+                            "phase": CURRENT_PHASE,  # ← CRITICAL
+                            "question": question[:200],
+                            "generated_sql": generated_sql[:300],
+                            "schema_length": len(self.schema),
+                            "judged": quality_eval is not None,
+                            "streaming_candidate": streaming_candidate,
+                        }
+                    )
+                    
+                    logger.info(f"📊 Tracked SQL generation: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+            
             # ═══════════════════════════════════════════════════════════════
-            
-            # Create prompt breakdown for Tier 2
-            prompt_breakdown = create_prompt_breakdown(
-                system_prompt=system_prompt,
-                system_prompt_tokens=estimate_tokens(system_prompt),
-                user_message=user_message,
-                user_message_tokens=estimate_tokens(user_message),
-            ) if create_prompt_breakdown else None
-            
-            # LLM Judge evaluation
-            quality_eval = await judge.maybe_evaluate(
-                operation="generate_sql",
-                prompt=full_prompt,
-                response=generated_sql,
-                llm_client=self.kernel,
-                conversation_id=self.memory.conversation_id if self.memory else None,
-                turn_number=self.memory.turn_number if self.memory else None,
-            )
-            
-            # Tier 3: Routing decision (placeholder - ready for optimization)
-            routing_decision = create_routing_decision(
-                chosen_model=DEFAULT_MODEL,
-                alternative_models=["gpt-4o", "gpt-4o-mini"],
-                reasoning="SQL generation - deterministic task",
-                complexity_score=calculate_complexity_score(question)
-            ) if create_routing_decision else None
-            
-            # Tier 3: Cache metadata - WITH REAL DATA
-            cache_metadata = create_cache_metadata(
-                cache_hit=cache_hit,
-                cache_key=cache_key,
-                cache_cluster_id="sql_generation",
-                similarity_score=cache_result.similarity if cache_hit else None,
-            ) if create_cache_metadata else None
-            
-            # Track in Observatory - COMPLETE with all tiers
-            track_llm_call(
-                # Core metrics (Tier 1)
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                latency_ms=latency_ms,
-                agent_name="DatabaseQuery",
-                agent_role="analyst",
-                operation="generate_sql",
-                success=True,
-                
-                # Prompt analysis (Tier 2)
-                system_prompt=system_prompt,
-                user_message=user_message,
-                response_text=generated_sql,
-                prompt_metadata=SQL_PROMPT_META,
-                prompt_breakdown=prompt_breakdown,  # Added: token breakdown
-                
-                # Quality evaluation (Tier 2) - Added
-                quality_evaluation=quality_eval,
-                
-                # Optimization tracking (Tier 3)
-                routing_decision=routing_decision,  # Added: routing
-                cache_metadata=cache_metadata,  # Added: cache
-                
-                # A/B Testing support (Tier 3)
-                prompt_variant_id=None,  # Added: ready for A/B tests
-                test_dataset_id=None,  # Added: ready for test runs
-                
-                # NEW: Conversation linking
-                conversation_id=self.memory.conversation_id if self.memory else None,
-                turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-                
-                # NEW: Model configuration
-                temperature=0.0,  # SQL generation should be deterministic
-                max_tokens=None,
-                
-                # NEW: Token breakdown (top-level)
-                system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
-                user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
-                
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Prefix hash (schema is static, question varies)
-                prompt_prefix_hash=calculate_prefix_hash(system_prompt, self.schema[:1000]),
-                
-                # NEW: Observability
-                environment=os.getenv("ENVIRONMENT", "development"),
-                
-                # Metadata
-                metadata={
-                    "question": question[:200],
-                    "generated_sql": generated_sql[:300],
-                    "schema_length": len(self.schema),
-                    "judged": quality_eval is not None,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings,
-                }
-            )
-            
-            print(f"📊 Tracked SQL generation: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            # SQL EXECUTION (common path for all branches above)
+            # ═══════════════════════════════════════════════════════════════
             
             # Clean up generated SQL
             if "```sql" in generated_sql:
@@ -322,7 +422,7 @@ SQL Query:"""
             
             generated_sql = generated_sql.rstrip(";")
             
-            print(f"📝 Generated SQL: {generated_sql}")
+            logger.info(f"📝 Generated SQL: {generated_sql}")
             
             # Validate query safety
             is_safe, safety_reason = self._is_safe_query(generated_sql)
@@ -362,158 +462,73 @@ SQL Query:"""
             return result_text
             
         except sqlite3.Error as e:
-            # Phase 2 Fix: Complete error tracking with token breakdown, routing, cache
-
-            # Token breakdown (use cached values if available)
-            _system_tokens = estimate_tokens(system_prompt) if 'system_prompt' in locals() else None
-            _user_tokens = estimate_tokens(user_message) if 'user_message' in locals() else None
-
-            # Routing decision (same as success path)
-            _routing = create_routing_decision(
-                chosen_model=DEFAULT_MODEL,
-                alternative_models=["gpt-4o", "gpt-4o-mini"],
-                reasoning="SQL generation - deterministic task (error path)",
-                complexity_score=calculate_complexity_score(question)
-            ) if create_routing_decision else None
+            # Classify error
+            error_info = classify_error(e, operation="generate_sql")
             
-            # Cache metadata (use values from earlier if available)
-            _cache_meta = create_cache_metadata(
-                cache_hit=cache_hit if 'cache_hit' in locals() else False,
-                cache_key=cache_key if 'cache_key' in locals() else generate_cache_key("generate_sql", question),
-                cache_cluster_id="sql_generation",
-            ) if create_cache_metadata else None
-            
+            # Track database error with phase metadata
             track_llm_call(
-                # Core metrics (Tier 1)
-                prompt_tokens=estimate_tokens(full_prompt) if 'full_prompt' in locals() else 0,
+                prompt_tokens=estimate_tokens(system_prompt + user_message) if 'system_prompt' in locals() else 0,
                 completion_tokens=estimate_tokens(generated_sql) if 'generated_sql' in locals() else 0,
-                latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
+                latency_ms=latency_ms if 'latency_ms' in locals() else 0,
                 agent_name="DatabaseQuery",
                 agent_role="analyst",
                 operation="generate_sql",
                 success=False,
                 error=f"Database error: {str(e)}",
-                prompt_metadata=SQL_PROMPT_META,
-
-                # Prompt content (Tier 2) - Phase 2 addition
                 system_prompt=system_prompt if 'system_prompt' in locals() else None,
                 user_message=user_message if 'user_message' in locals() else None,
                 response_text=generated_sql if 'generated_sql' in locals() else None,
-
-                # Token breakdown (Tier 2) - Phase 2 addition
-                system_prompt_tokens=_system_tokens,
-                user_message_tokens=_user_tokens,
-
-                # Model config (Tier 2)
                 temperature=0.0,
-
-                # Routing decision (Tier 3) - Phase 2 addition
-                routing_decision=_routing,
-
-                # Cache metadata (Tier 3) - Phase 2 addition
-                cache_metadata=_cache_meta,
-
-                # Error details
-                error_type="sqlite_error",
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
                 request_id=str(uuid.uuid4()),
-
-                # Streaming
-                time_to_first_token_ms=None,
-
-                # Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL
                     "question": question[:200],
                     "generated_sql": generated_sql[:300] if 'generated_sql' in locals() else None,
-                    "error_type": "sqlite_error",
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
+                    "error_type": error_info['error_type'],
                 }
             )
             return f"❌ Database error: {str(e)}\nGenerated SQL was: {generated_sql if 'generated_sql' in locals() else 'N/A'}"
-
-        # generate_sql
+            
         except Exception as e:
-            # Phase 2 Fix: Complete error tracking with token breakdown, routing, cache
-
-            # Token breakdown (use cached values if available)
-            _system_tokens = estimate_tokens(system_prompt) if 'system_prompt' in locals() else None
-            _user_tokens = estimate_tokens(user_message) if 'user_message' in locals() else None
-
-            # Routing decision (same as success path)
-            _routing = create_routing_decision(
-                chosen_model=DEFAULT_MODEL,
-                alternative_models=["gpt-4o", "gpt-4o-mini"],
-                reasoning="SQL generation - deterministic task (error path)",
-                complexity_score=calculate_complexity_score(question)
-            ) if create_routing_decision else None
+            # Classify error
+            error_info = classify_error(e, operation="generate_sql")
             
-            # Cache metadata (use values from earlier if available)
-            _cache_meta = create_cache_metadata(
-                cache_hit=cache_hit if 'cache_hit' in locals() else False,
-                cache_key=cache_key if 'cache_key' in locals() else generate_cache_key("generate_sql", question),
-                cache_cluster_id="sql_generation",
-            ) if create_cache_metadata else None
-            
+            # Track general error with phase metadata
             track_llm_call(
-                # Core metrics (Tier 1)
-                prompt_tokens=estimate_tokens(full_prompt) if 'full_prompt' in locals() else 0,
+                prompt_tokens=estimate_tokens(system_prompt + user_message) if 'system_prompt' in locals() else 0,
                 completion_tokens=estimate_tokens(generated_sql) if 'generated_sql' in locals() else 0,
-                latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
+                latency_ms=latency_ms if 'latency_ms' in locals() else 0,
                 agent_name="DatabaseQuery",
                 agent_role="analyst",
                 operation="generate_sql",
                 success=False,
                 error=str(e),
-                prompt_metadata=SQL_PROMPT_META,
-
-                # Prompt content (Tier 2) - Phase 2 addition
                 system_prompt=system_prompt if 'system_prompt' in locals() else None,
                 user_message=user_message if 'user_message' in locals() else None,
                 response_text=generated_sql if 'generated_sql' in locals() else None,
-
-                # Token breakdown (Tier 2) - Phase 2 addition
-                system_prompt_tokens=_system_tokens,
-                user_message_tokens=_user_tokens,
-
-                # Model config (Tier 2)
                 temperature=0.0,
-
-                # Routing decision (Tier 3) - Phase 2 addition
-                routing_decision=_routing,
-
-                # Cache metadata (Tier 3) - Phase 2 addition
-                cache_metadata=_cache_meta,
-
-                # ERROR CLASSIFICATION
-                **classify_error(e, operation="generate_sql"),
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
                 request_id=str(uuid.uuid4()),
-
-                # Streaming
-                time_to_first_token_ms=None,
-
-                # Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL
                     "question": question[:200],
                     "generated_sql": generated_sql[:300] if 'generated_sql' in locals() else None,
-                    "error_type": "general_error",
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
+                    "error_type": error_info['error_type'],
                 }
             )
             return f"❌ Error processing query: {str(e)}"
@@ -535,6 +550,7 @@ SQL Query:"""
         Retrieve top job matches sorted by match score.
         """
         start_time = time.time()
+        request_id = str(uuid.uuid4())
         
         try:
             conn = sqlite3.connect(self.db_path)
@@ -596,7 +612,7 @@ SQL Query:"""
                 
                 result += "\nSay 'tell me about match #1' for details or 'explain match #2' for why you matched."
             
-            # Track database read operation
+            # Track database read operation with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -607,39 +623,29 @@ SQL Query:"""
                 success=True,
                 prompt=f"Get top {limit} matches for resume {resume_id}",
                 response_text=result[:500],
-                routing_decision=None,
-                cache_metadata=None,
-                quality_evaluation=None,
-                prompt_variant_id=None,
-                test_dataset_id=None,
-
-                # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-                
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                request_id=request_id,
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL
                     "resume_id": resume_id,
                     "resume_name": resume_name if 'resume_name' in locals() else None,
                     "limit": limit,
                     "matches_returned": len(matches) if 'matches' in locals() else 0,
                     "is_db_read": True,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
                 }
             )
             
             return result
-
-        # get_top_matches    
+            
         except Exception as e:
+            # Classify error
+            error_info = classify_error(e, operation="get_top_matches")
+            
+            # Track error with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -649,24 +655,21 @@ SQL Query:"""
                 operation="get_top_matches",
                 success=False,
                 error=str(e),
-                
-                # NEW: Error details
-                **classify_error(e, operation="get_top_matches"),
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-                
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                request_id=request_id,
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
-                metadata={"resume_id": resume_id, "is_db_read": True, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL
+                    "resume_id": resume_id,
+                    "is_db_read": True,
+                    "error_type": error_info['error_type'],
+                }
             )
             return f"❌ Error retrieving matches: {str(e)}"
     
@@ -686,6 +689,7 @@ SQL Query:"""
         Retrieve recently saved jobs sorted by creation date.
         """
         start_time = time.time()
+        request_id = str(uuid.uuid4())
         
         try:
             conn = sqlite3.connect(self.db_path)
@@ -713,7 +717,7 @@ SQL Query:"""
                     result += f"   📅 Saved: {created_at}\n"
                     result += f"   🔗 {link}\n\n"
             
-            # Track database read operation
+            # Track database read operation with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -724,37 +728,27 @@ SQL Query:"""
                 success=True,
                 prompt=f"Get recent {limit} saved jobs",
                 response_text=result[:500],
-                routing_decision=None,
-                cache_metadata=None,
-                quality_evaluation=None,
-                prompt_variant_id=None,
-                test_dataset_id=None,
-
-                # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-                
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                request_id=request_id,
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL
                     "limit": limit,
                     "jobs_returned": len(jobs) if 'jobs' in locals() else 0,
                     "is_db_read": True,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
                 }
             )
             
             return result
-
-        # get_recent_saved_jobs    
+            
         except Exception as e:
+            # Classify error
+            error_info = classify_error(e, operation="get_recent_saved_jobs")
+            
+            # Track error with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -764,25 +758,21 @@ SQL Query:"""
                 operation="get_recent_saved_jobs",
                 success=False,
                 error=str(e),
-                
-                # NEW: Error details
-                **classify_error(e, operation="get_recent_saved_jobs"),
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-                
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                request_id=request_id,
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
-                metadata={"limit": limit, "is_db_read": True, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
-                
+                metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL
+                    "limit": limit,
+                    "is_db_read": True,
+                    "error_type": error_info['error_type'],
+                }
             )
             return f"❌ Error retrieving recent jobs: {str(e)}"
 
@@ -801,6 +791,7 @@ SQL Query:"""
     async def get_database_stats(self) -> Annotated[str, "Database statistics"]:
         """Provides quick statistics about the database contents."""
         start_time = time.time()
+        request_id = str(uuid.uuid4())
         
         try:
             conn = sqlite3.connect(self.db_path)
@@ -832,7 +823,7 @@ SQL Query:"""
 📍 Unique Locations: {location_count}
 """
             
-            # Track database read operation
+            # Track database read operation with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -843,38 +834,28 @@ SQL Query:"""
                 success=True,
                 prompt="Get database statistics",
                 response_text=stats,
-                routing_decision=None,
-                cache_metadata=None,
-                quality_evaluation=None,
-                prompt_variant_id=None,
-                test_dataset_id=None,
-
-                # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-                
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                request_id=request_id,
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL
                     "resume_count": resume_count,
                     "job_count": job_count,
                     "match_count": match_count,
                     "is_db_read": True,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
                 }
             )
             
             return stats
-
-        # get_database_stats    
+            
         except Exception as e:
+            # Classify error
+            error_info = classify_error(e, operation="get_database_stats")
+            
+            # Track error with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -884,23 +865,19 @@ SQL Query:"""
                 operation="get_database_stats",
                 success=False,
                 error=str(e),
-                
-                # NEW: Error details
-                **classify_error(e, operation="get_database_stats"),
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-                
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                request_id=request_id,
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
-                metadata={"is_db_read": True, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL
+                    "is_db_read": True,
+                    "error_type": error_info['error_type'],
+                }
             )
             return f"❌ Error retrieving stats: {str(e)}"

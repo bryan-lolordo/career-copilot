@@ -1178,24 +1178,37 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 6: Make LLM call (use optimized values)
                     # ═══════════════════════════════════════════════════════════════
-                    # Redefine full_prompt with optimized prompt for caching
-                    full_prompt = f"{optimized_prompt}\n\n{user_message}"
-                    
-                    # Use kernel (BASELINE - this was working)
+                    # Add instructions for JSON-only response
+                    json_instruction = "\n\nYou must respond with ONLY valid JSON matching the required schema. No other text."
+                    system_prompt_with_json = system_prompt + json_instruction  # Use original, not optimized
+
+                    # Build full_prompt for caching and evaluation
+                    full_prompt = f"{system_prompt_with_json}\n\n{user_message}"
+
+                    # Use direct Azure OpenAI call to avoid kernel's system prompt interference
+                    client = AsyncAzureOpenAI(
+                        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                        api_version="2024-02-01",
+                        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+                    )
+
+                
                     llm_start_time = time.time()
-                    result = await self.kernel.invoke_prompt(
-                        prompt=optimized_prompt,
-                        user_message=user_message,
-                        max_tokens=max_tokens_limit,
-                        temperature=0.3,  # Quick score uses 0.3
+                    response = await client.chat.completions.create(
+                        model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", routed_model),
+                        messages=[
+                            {"role": "system", "content": system_prompt_with_json},
+                            {"role": "user", "content": user_message}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.3,
+                        max_tokens=max_tokens_limit
                     )
                     latency_ms = (time.time() - llm_start_time) * 1000
-                    
-                    result_str = str(result)
-                    # Note: kernel doesn't expose token counts directly
-                    # Observatory will estimate these
-                    prompt_tokens = estimate_tokens(full_prompt)
-                    completion_tokens = estimate_tokens(result_str)
+
+                    result_str = response.choices[0].message.content.strip()
+                    prompt_tokens = response.usage.prompt_tokens
+                    completion_tokens = response.usage.completion_tokens
 
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 7: Detect streaming candidates
@@ -1593,24 +1606,36 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 6: Make LLM call (use optimized values)
                     # ═══════════════════════════════════════════════════════════════
-                    # Redefine full_prompt with optimized prompt for caching
-                    full_prompt = f"{optimized_prompt}\n\n{user_message}"
+                    # Add instructions for JSON-only response
+                    json_instruction = "\n\nYou must respond with ONLY valid JSON matching the required schema. No other text."
+                    system_prompt_with_json = system_prompt + json_instruction  # Use original, not optimized
                     
-                    # Use kernel (BASELINE - this was working)
+                    # Build full_prompt for caching and evaluation
+                    full_prompt = f"{system_prompt_with_json}\n\n{user_message}"
+
+                    # Use direct Azure OpenAI call to avoid kernel's system prompt interference
+                    client = AsyncAzureOpenAI(
+                        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                        api_version="2024-02-01",
+                        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+                    )
+
                     llm_start_time = time.time()
-                    result = await self.kernel.invoke_prompt(
-                        prompt=optimized_prompt,
-                        user_message=user_message,
-                        max_tokens=max_tokens_limit,
+                    response = await client.chat.completions.create(
+                        model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", routed_model),
+                        messages=[
+                            {"role": "system", "content": system_prompt_with_json},
+                            {"role": "user", "content": user_message}
+                        ],
+                        response_format={"type": "json_object"},
                         temperature=0.5,
+                        max_tokens=max_tokens_limit
                     )
                     latency_ms = (time.time() - llm_start_time) * 1000
-                    
-                    result_str = str(result)
-                    # Note: kernel doesn't expose token counts directly
-                    # Observatory will estimate these
-                    prompt_tokens = estimate_tokens(full_prompt)
-                    completion_tokens = estimate_tokens(result_str)
+
+                    result_str = response.choices[0].message.content.strip()
+                    prompt_tokens = response.usage.prompt_tokens
+                    completion_tokens = response.usage.completion_tokens
                     
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 7: Detect streaming candidates

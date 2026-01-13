@@ -1,7 +1,7 @@
 # agents/plugins/ResumeTailoringPlugin.py
 """
 Resume Tailoring Plugin - Career Copilot
-UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
+UPDATED: Complete Observatory integration with full 10-step optimization pattern
 """
 
 from semantic_kernel.functions import kernel_function
@@ -12,27 +12,38 @@ import os
 import time
 import uuid
 
-# Observatory Integration - Complete imports
+# ═════════════════════════════════════════════════════════════════════════
+# OBSERVATORY INTEGRATION - STANDARDIZED IMPORT BLOCK FOR LLM-MAKING PLUGINS
+# ═════════════════════════════════════════════════════════════════════════
 from observatory_config import (
-    start_session,
-    end_session,
+    # Main tracking
     track_llm_call,
+    
+    # Optimization components (10-step pattern - import ALL for consistency)
+    cache,
+    semantic_cache,
+    prefix_cache,
+    router,
+    prompt_optimizer,
+    streaming_detector,
+    batch_detector,
+    parallel_detector,
+    judge,
+    
+    # Config constants
+    DEFAULT_MODEL,
+    CURRENT_PHASE,
+    
+    # Data models
+    PromptMetadata,
+    
+    # Helper functions
     create_prompt_metadata,
     create_prompt_breakdown,
     create_routing_decision,
     create_cache_metadata,
-    judge,
-    DEFAULT_MODEL,
-    PromptMetadata,
-    ModelConfig,
-    StreamingMetrics,
-    ExperimentMetadata,
-    ErrorDetails,
-    classify_error,
-    generate_cache_key,
-    calculate_prefix_hash,
     estimate_tokens,
-    calculate_complexity_score,
+    classify_error,
 )
 
 # Configure logging
@@ -43,24 +54,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 IMPROVE_BULLET_PROMPT_VERSION = "1.1.0"
 CHANGE_REPORT_PROMPT_VERSION = "1.0.0"
-
-# Create PromptMetadata for resume tailoring operations
-IMPROVE_BULLET_META = create_prompt_metadata(
-    template_id="resume_tailoring_improve_bullet",
-    version=IMPROVE_BULLET_PROMPT_VERSION,
-    compressible_sections=["Context", "Your Task"],
-    optimization_flags={"creative_task": True},
-    config_version="1.0"
-) if PromptMetadata else None
-
-CHANGE_REPORT_META = create_prompt_metadata(
-    template_id="resume_tailoring_change_report",
-    version=CHANGE_REPORT_PROMPT_VERSION,
-    compressible_sections=[],
-    optimization_flags={"formatting_task": True},
-    config_version="1.0"
-) if PromptMetadata else None
-
 
 class ResumeTailoringPlugin:
     
@@ -95,6 +88,8 @@ class ResumeTailoringPlugin:
         """
         Takes a user request and generates 3 improved resume bullet point variations
         that are tailored to the specific job requirements.
+        
+        Implements full 10-step optimization pattern.
         """
         
         # Build the prompt
@@ -148,119 +143,274 @@ Required JSON format:
   "original_identified": "The original bullet point from the resume that you're improving, or 'New bullet point' if creating from scratch"
 }}"""
 
-        full_prompt = f"{system_prompt}\n\n{user_message}"
-
         try:
-            # Track LLM call
-            llm_start_time = time.time()
+            logger.info(f"🖊️  Generating resume improvements for: '{job_title}' at {company}")
             
-            result = await self.kernel.invoke_prompt(full_prompt)
+            # ═══════════════════════════════════════════════════════════════
+            # INITIALIZE ALL VARIABLES (prevents undefined variable errors)
+            # ═══════════════════════════════════════════════════════════════
+            cache_meta = None
+            routing_meta = None
+            prompt_meta = None
+            quality_eval = None
+            streaming_candidate = False
+            prompt_breakdown = None
+            result_str = None
+            latency_ms = 0
+            prompt_tokens = 0
+            completion_tokens = 0
+            optimized_prompt = system_prompt  # Default
+            max_tokens_limit = 1500  # Default
+            routed_model = DEFAULT_MODEL  # Default
             
-            latency_ms = (time.time() - llm_start_time) * 1000
-            result_str = str(result).strip()
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 1: Check exact cache
+            # ═══════════════════════════════════════════════════════════════
+            operation = "improve_bullet"
+            cache_key_data = {
+                "user_request": user_request,
+                "job_title": job_title,
+                "company": company
+            }
             
-            # Estimate tokens
-            prompt_tokens = estimate_tokens(full_prompt)
-            completion_tokens = estimate_tokens(result_str)
-            
-            # Create prompt breakdown for Tier 2
-            prompt_breakdown = create_prompt_breakdown(
-                system_prompt=system_prompt,
-                system_prompt_tokens=estimate_tokens(system_prompt),
-                user_message=user_message,
-                user_message_tokens=estimate_tokens(user_message),
-            ) if create_prompt_breakdown else None
-            
-            # LLM Judge evaluation 
-            quality_eval = await judge.maybe_evaluate(
-                operation="improve_bullet",  
-                prompt=full_prompt,
-                response=result_str,
-                llm_client=self.kernel, 
-                conversation_id=self.memory.conversation_id if self.memory else None,
-                turn_number=self.memory.turn_number if self.memory else None, 
-            )
-            # Tier 3: Routing decision (placeholder - ready for optimization)
-            routing_decision = create_routing_decision(
-                chosen_model=DEFAULT_MODEL,  # Will be filled by observatory_config
-                alternative_models=["gpt-4o", "gpt-4o-mini"],
-                reasoning="Creative task - using default model",
-                complexity_score=0.7
-            ) if create_routing_decision else None
-            
-            # Tier 3: Cache metadata (placeholder - ready for optimization)
-            cache_metadata = create_cache_metadata(
-                cache_hit=False,
-                cache_key=generate_cache_key("improve_bullet", user_request, job_title),  
-                cache_cluster_id="resume_tailoring"
-            ) if create_cache_metadata else None
-            
-            # Track in Observatory - COMPLETE with all tiers
-            track_llm_call(
-                # Core metrics (Tier 1)
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                latency_ms=latency_ms,
-                agent_name="ResumeTailoring",
-                agent_role="writer",  # Added: agent role
-                operation="improve_bullet",
-                success=True,  # Added: explicit success
-                
-                # Prompt analysis (Tier 2)
-                system_prompt=system_prompt,
-                user_message=user_message,
-                response_text=result_str,
-                prompt_metadata=IMPROVE_BULLET_META,
-                prompt_breakdown=prompt_breakdown,  # Added: token breakdown
-                
-                # Quality evaluation (Tier 2)
-                quality_evaluation=quality_eval,
-                
-                # Optimization tracking (Tier 3)
-                routing_decision=routing_decision,  # Added: routing
-                cache_metadata=cache_metadata,  # Added: cache
-                
-                # A/B Testing support (Tier 3)
-                prompt_variant_id=None,  # Added: ready for A/B tests
-                test_dataset_id=None,  # Added: ready for test runs
-                
-                # NEW: Conversation linking
-                conversation_id=self.memory.conversation_id if self.memory else None,
-                turn_number=self.memory.turn_number if self.memory else None,
-                parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-
-                # NEW: Model configuration
-                temperature=0.7,  # Creative writing for resume improvement
-                max_tokens=None,  # Keep None to see inefficiencies
-                
-                # NEW: Token breakdown (top-level)
-                system_prompt_tokens=prompt_breakdown.system_prompt_tokens if prompt_breakdown else None,
-                user_message_tokens=prompt_breakdown.user_message_tokens if prompt_breakdown else None,
-                
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Prefix hash
-                prompt_prefix_hash=calculate_prefix_hash(system_prompt),
-                
-                # NEW: Observability
-                environment=os.getenv("ENVIRONMENT", "development"),
-                
-                # Metadata
-                metadata={
-                    "job_title": job_title,
-                    "company": company,
-                    "user_request": user_request[:100],
-                    "has_matched_skills": bool(matched_skills),
-                    "has_missing_skills": bool(missing_skills),
-                    "judged": quality_eval is not None,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
-                }
+            cached_result, cache_meta = cache.get(
+                operation=operation,
+                key_data=cache_key_data
             )
             
-            print(f"📊 Tracked resume tailoring: {latency_ms:.0f}ms, ~{prompt_tokens + completion_tokens} tokens")
+            # Ensure cache_meta is None if empty dict
+            if isinstance(cache_meta, dict) and not cache_meta:
+                cache_meta = None
+            
+            if cached_result:
+                logger.info(f"✅ Cache hit! Using cached improvement suggestions.")
+                result_str = cached_result
+                latency_ms = 1.0
+                prompt_tokens = 0
+                completion_tokens = 0
+                
+                # Track cache hit
+                track_llm_call(
+                    operation=operation,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=1.0,
+                    success=True,
+                    response_text=result_str,
+                    cache_metadata=cache_meta,
+                    agent_name="ResumeTailoring",
+                    agent_role="writer",
+                    conversation_id=self.memory.conversation_id if self.memory else None,
+                    turn_number=self.memory.turn_number if self.memory else None,
+                    parent_call_id=self.memory.request_id if self.memory else None,
+                    request_id=str(uuid.uuid4()),
+                    trace_id=self.memory.conversation_id if self.memory else None,
+                    environment=os.getenv("ENVIRONMENT", "development"),
+                    metadata={
+                        "phase": CURRENT_PHASE,
+                        "cache_hit": True,
+                        "job_title": job_title,
+                        "company": company,
+                    }
+                )
+                
+                # Skip to result parsing
+            
+            else:
+                # ═══════════════════════════════════════════════════════════════
+                # STEP 2: Check semantic cache (if available)
+                # ═══════════════════════════════════════════════════════════════
+                semantic_hit = False  # Track if semantic cache hit
+                
+                if semantic_cache:
+                    result = await semantic_cache.get(operation=operation, prompt=user_request)
+                    if result.hit:
+                        logger.info(f"✅ Semantic cache hit ({result.similarity:.1%} similar)!")
+                        result_str = result.response
+                        latency_ms = 1.0
+                        prompt_tokens = 0
+                        completion_tokens = 0
+                        semantic_hit = True
+                        
+                        # Track semantic cache hit
+                        track_llm_call(
+                            operation=operation,
+                            prompt_tokens=0,
+                            completion_tokens=0,
+                            latency_ms=1.0,
+                            success=True,
+                            response_text=result_str,
+                            cache_metadata=create_cache_metadata(
+                                cache_hit=True,
+                                similarity_score=result.similarity
+                            ),
+                            agent_name="ResumeTailoring",
+                            agent_role="writer",
+                            conversation_id=self.memory.conversation_id if self.memory else None,
+                            turn_number=self.memory.turn_number if self.memory else None,
+                            parent_call_id=self.memory.request_id if self.memory else None,
+                            request_id=str(uuid.uuid4()),
+                            trace_id=self.memory.conversation_id if self.memory else None,
+                            environment=os.getenv("ENVIRONMENT", "development"),
+                            metadata={
+                                "phase": CURRENT_PHASE,
+                                "semantic_cache_hit": True,
+                                "similarity": result.similarity,
+                                "job_title": job_title,
+                            }
+                        )
+                        
+                        # Skip to result parsing
+                
+                # If no cache hit, proceed with LLM call
+                if not cached_result and not semantic_hit:
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 3: Get optimized prompt and max_tokens
+                    # ═══════════════════════════════════════════════════════════════
+                    optimized_prompt, max_tokens_limit, prompt_meta = prompt_optimizer.get_optimized_prompt(
+                        operation=operation,
+                        default_prompt=system_prompt
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 4: Get routed model
+                    # ═══════════════════════════════════════════════════════════════
+                    routed_model, routing_meta = router.select(
+                        operation=operation,
+                        prompt=optimized_prompt + user_message,
+                        estimated_tokens=estimate_tokens(optimized_prompt + user_message),
+                        complexity=0.7  # Creative writing is medium-high complexity
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 5: Track prefix for prefix caching detection
+                    # ═══════════════════════════════════════════════════════════════
+                    prefix_cache.track_call(
+                        operation=operation,
+                        system_prompt=optimized_prompt,
+                        system_prompt_tokens=estimate_tokens(optimized_prompt),
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 6: Make LLM call (use optimized values)
+                    # ═══════════════════════════════════════════════════════════════
+                    full_prompt = f"{optimized_prompt}\n\n{user_message}"
+                    
+                    llm_start_time = time.time()
+                    result = await self.kernel.invoke_prompt(full_prompt)
+                    latency_ms = (time.time() - llm_start_time) * 1000
+                    
+                    result_str = str(result).strip()
+                    prompt_tokens = estimate_tokens(full_prompt)
+                    completion_tokens = estimate_tokens(result_str)
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 7: Detect streaming candidates
+                    # ═══════════════════════════════════════════════════════════════
+                    streaming_candidate = streaming_detector.check_call(
+                        operation=operation,
+                        latency_ms=latency_ms,
+                        completion_tokens=completion_tokens,
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 8: Cache the response
+                    # ═══════════════════════════════════════════════════════════════
+                    cache.set(
+                        operation=operation,
+                        key_data=cache_key_data,
+                        value=result_str
+                    )
+                    
+                    if semantic_cache:
+                        await semantic_cache.set(
+                            operation=operation,
+                            prompt=user_request,
+                            response=result_str
+                        )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 9: Create prompt breakdown and evaluate quality
+                    # ═══════════════════════════════════════════════════════════════
+                    prompt_breakdown = create_prompt_breakdown(
+                        system_prompt=optimized_prompt,
+                        system_prompt_tokens=estimate_tokens(optimized_prompt),
+                        user_message=user_message,
+                        user_message_tokens=estimate_tokens(user_message),
+                    )
+                    
+                    # LLM Judge evaluation
+                    quality_eval = await judge.maybe_evaluate(
+                        operation=operation,
+                        prompt=full_prompt,
+                        response=result_str,
+                        llm_client=self.kernel,
+                        conversation_id=self.memory.conversation_id if self.memory else None,
+                        turn_number=self.memory.turn_number if self.memory else None,
+                    )
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 10: Track with Observatory (CRITICAL - INCLUDE PHASE)
+                    # ═══════════════════════════════════════════════════════════════
+                    track_llm_call(
+                        # Core metrics
+                        model_name=routed_model,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        latency_ms=latency_ms,
+                        agent_name="ResumeTailoring",
+                        agent_role="writer",
+                        operation=operation,
+                        success=True,
+                        
+                        # Prompt content
+                        system_prompt=optimized_prompt,
+                        user_message=user_message,
+                        response_text=result_str,
+                        prompt_breakdown=prompt_breakdown,
+                        
+                        # Optimization tracking
+                        routing_decision=routing_meta,
+                        cache_metadata=None, 
+                        quality_evaluation=quality_eval,
+                        prompt_metadata=None,
+                        
+                        # Model configuration
+                        temperature=0.7,  # Creative writing for resume improvement
+                        max_tokens=max_tokens_limit,
+                        
+                        # Token breakdown
+                        system_prompt_tokens=estimate_tokens(optimized_prompt),
+                        user_message_tokens=estimate_tokens(user_message),
+                        
+                        # Conversation linking
+                        conversation_id=self.memory.conversation_id if self.memory else None,
+                        turn_number=self.memory.turn_number if self.memory else None,
+                        parent_call_id=self.memory.request_id if self.memory else None,
+                        request_id=str(uuid.uuid4()),
+                        
+                        # Observability
+                        trace_id=self.memory.conversation_id if self.memory else None,
+                        environment=os.getenv("ENVIRONMENT", "development"),
+                        
+                        # Metadata - CRITICAL: Include phase
+                        metadata={
+                            "phase": CURRENT_PHASE,
+                            "job_title": job_title,
+                            "company": company,
+                            "user_request": user_request[:100],
+                            "has_matched_skills": bool(matched_skills),
+                            "has_missing_skills": bool(missing_skills),
+                            "judged": quality_eval is not None,
+                            "streaming_candidate": streaming_candidate,
+                        }
+                    )
+                    
+                    logger.info(f"📊 Tracked resume tailoring: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # RESULT PARSING (common path for all branches above)
+            # ═══════════════════════════════════════════════════════════════
             
             # Clean up response - extract JSON
             if '```json' in result_str:
@@ -290,34 +440,37 @@ Required JSON format:
             return json.dumps(suggestions_data, indent=2)
             
         except json.JSONDecodeError as e:
-            print(f"❌ JSON parsing error: {e}")
-            print(f"Raw response: {result_str[:500]}")
+            logger.error(f"JSON parsing error: {e}")
+            logger.debug(f"Raw response: {result_str[:500] if 'result_str' in locals() else 'N/A'}")
+            
+            # Classify error
+            error_info = classify_error(e, operation="improve_bullet")
             
             # Track failed call
             track_llm_call(
-                prompt_tokens=estimate_tokens(full_prompt) if 'full_prompt' in locals() else 0,
-                completion_tokens=0,
-                latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
+                prompt_tokens=estimate_tokens(system_prompt + user_message) if 'system_prompt' in locals() else 0,
+                completion_tokens=estimate_tokens(result_str) if 'result_str' in locals() else 0,
+                latency_ms=latency_ms if 'latency_ms' in locals() else 0,
                 agent_name="ResumeTailoring",
                 agent_role="writer",
                 operation="improve_bullet",
                 success=False,
                 error=f"JSON parsing error: {str(e)}",
-                prompt_metadata=IMPROVE_BULLET_META,
-
-                # NEW: Conversation linking
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
+                retry_count=0,
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                equest_id=self.memory.request_id if self.memory else None,
-
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                request_id=str(uuid.uuid4()),
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
-                metadata={"job_title": job_title, "company": company, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                metadata={
+                    "phase": CURRENT_PHASE,
+                    "job_title": job_title,
+                    "company": company,
+                    "error_type": error_info['error_type'],
+                }
             )
             
             return json.dumps({
@@ -325,36 +478,38 @@ Required JSON format:
                 "suggestions": [],
                 "original_identified": "Error"
             })
-        
+
         except Exception as e:
-            print(f"❌ Error generating suggestions: {type(e).__name__}: {e}")
+            logger.error(f"Error generating suggestions: {type(e).__name__}: {e}")
+            
+            # Classify error
+            error_info = classify_error(e, operation="improve_bullet")
             
             # Track failed call
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
-                latency_ms=(time.time() - llm_start_time) * 1000 if 'llm_start_time' in locals() else 0,
+                latency_ms=latency_ms if 'latency_ms' in locals() else 0,
                 agent_name="ResumeTailoring",
                 agent_role="writer",
                 operation="improve_bullet",
                 success=False,
                 error=str(e),
-                prompt_metadata=IMPROVE_BULLET_META,
-
-                # ERROR CLASSIFICATION
-                **classify_error(e, operation="improve_bullet"),
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
                 request_id=str(uuid.uuid4()),
-
-                # Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
-                metadata={"job_title": job_title, "company": company, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                metadata={
+                    "phase": CURRENT_PHASE,
+                    "job_title": job_title,
+                    "company": company,
+                    "error_type": error_info['error_type'],
+                }
             )
             
             return json.dumps({
@@ -376,6 +531,7 @@ Required JSON format:
     ) -> Annotated[str, "Formatted markdown report of all changes"]:
         """
         Takes a list of approved changes and generates a clean, copy-paste ready report.
+        No LLM call - just formatting.
         """
         start_time = time.time()
         
@@ -432,39 +588,28 @@ Copy each improved bullet below and paste into your resume:
                 success=True,
                 prompt=f"Generate report for {len(changes)} changes",
                 response_text=report[:500],
-                prompt_metadata=CHANGE_REPORT_META,
-                routing_decision=None,
-                cache_metadata=None,
-                quality_evaluation=None,
-                prompt_variant_id=None,
-                test_dataset_id=None,
-
-                # NEW: Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
                 request_id=str(uuid.uuid4()),
-
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
                 metadata={
+                    "phase": CURRENT_PHASE,
                     "resume_name": resume_name,
                     "job_title": job_title,
                     "company": company,
                     "num_changes": len(changes),
                     "is_formatting_only": True,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
                 }
             )
             
             return report
             
         except Exception as e:
+            # Classify error
+            error_info = classify_error(e, operation="generate_change_report")
+            
             # Track error
             track_llm_call(
                 prompt_tokens=0,
@@ -475,21 +620,20 @@ Copy each improved bullet below and paste into your resume:
                 operation="generate_change_report",
                 success=False,
                 error=str(e),
-
-                # ERROR CLASSIFICATION
-                **classify_error(e, operation="generate_change_report"),
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
                 request_id=str(uuid.uuid4()),
-                
-                # Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
-                
-                metadata={"resume_name": resume_name, "conversation_memory": self.memory, "execution_settings": self.exec_settings}
+                metadata={
+                    "phase": CURRENT_PHASE,
+                    "resume_name": resume_name,
+                    "error_type": error_info['error_type'],
+                }
             )
             return f"Error generating report: {str(e)}"
 

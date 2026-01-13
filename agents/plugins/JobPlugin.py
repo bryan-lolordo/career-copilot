@@ -1,7 +1,10 @@
 # agents/plugins/JobPlugin.py
 """
 Job Plugin - Career Copilot
-UPDATED: Complete Observatory Tier 1, 2, 3 metrics coverage
+UPDATED: Complete Observatory integration with two-phase system
+
+Plugin operations are tracked but don't use optimization components
+(caching, routing, etc.) - those are for the main orchestrator only.
 """
 
 from semantic_kernel.functions import kernel_function
@@ -15,24 +18,20 @@ import uuid
 from services.job_api import search_jobs
 from services.db import save_jobs
 
-# Observatory Integration - Complete imports
+# Observatory Integration - CORRECT imports (only what exists in observatory_config.py)
 from observatory_config import (
-    start_session,
-    end_session,
+    # Main tracking
     track_llm_call,
-    create_prompt_metadata,
-    create_prompt_breakdown,
-    create_routing_decision,
-    create_cache_metadata,
-    judge,
-    DEFAULT_MODEL,
+    
+    # Config constants
+    CURRENT_PHASE,
+    
+    # Data models
     PromptMetadata,
-    ModelConfig,
-    StreamingMetrics,
-    ExperimentMetadata,
-    ErrorDetails,
+    
+    # Helper functions
+    create_prompt_metadata,
     classify_error,
-    generate_cache_key
 )
 
 
@@ -40,14 +39,6 @@ from observatory_config import (
 # PROMPT VERSIONING (for API operations)
 # =============================================================================
 JOB_SEARCH_VERSION = "1.0.0"
-
-JOB_SEARCH_META = create_prompt_metadata(
-    template_id="job_plugin_search",
-    version=JOB_SEARCH_VERSION,
-    compressible_sections=[],
-    optimization_flags={"api_call": True, "cacheable": True},
-    config_version="1.0"
-) if PromptMetadata else None
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -64,6 +55,9 @@ logger.setLevel(logging.INFO)
 class JobPlugin:
     """
     Plugin to search for jobs using external APIs and save them to the database.
+    
+    Note: Plugins track their operations but don't use optimization components.
+    Caching, routing, and prompt optimization happen at the orchestrator level.
     """
     
     def __init__(self, context=None, memory=None):
@@ -98,21 +92,10 @@ class JobPlugin:
         """
         Search for jobs and store in context for exploration and later saving.
         """
-
-            # DEBUG - ADD THESE LINES AT THE VERY TOP
-        print(f"\n🔍 DEBUG JobPlugin.find_jobs:")
-        print(f"   self.memory = {self.memory}")
-        print(f"   type(self.memory) = {type(self.memory)}")
-        if self.memory:
-            print(f"   hasattr conversation_id? {hasattr(self.memory, 'conversation_id')}")
-            print(f"   hasattr turn_number? {hasattr(self.memory, 'turn_number')}")
-            print(f"   conversation_id = {getattr(self.memory, 'conversation_id', 'NO ATTRIBUTE')}")
-            print(f"   turn_number = {getattr(self.memory, 'turn_number', 'NO ATTRIBUTE')}")
-        print()
-
         logger.info(f"Searching for jobs: query='{query}', location='{location}', num_results={num_results}")
         
         start_time = time.time()
+        request_id = str(uuid.uuid4())
 
         try:
             # Fetch jobs from API
@@ -127,59 +110,39 @@ class JobPlugin:
                     "jobs": []
                 })
                 
-                # Tier 3: Cache metadata (ready for optimization)
-                cache_metadata = create_cache_metadata(
-                    cache_hit=False,
-                    cache_key=f"job_search:{query.lower()}:{location.lower()}",
-                    cache_cluster_id="job_search"
-                ) if create_cache_metadata else None
-                
-                # Track API call - COMPLETE with all tiers
+                # Track API call with phase metadata
                 track_llm_call(
-                    # Core metrics (Tier 1)
+                    # Core metrics
                     prompt_tokens=0,
                     completion_tokens=0,
                     latency_ms=latency_ms,
                     agent_name="JobPlugin",
-                    agent_role="retriever",  # Added: agent role
+                    agent_role="retriever",
                     operation="find_jobs",
-                    success=True,  # Added: explicit success
+                    success=True,
                     
-                    # Prompt content (Tier 2) - for API calls
+                    # Prompt content
                     prompt=f"Search: {query} in {location}",
                     response_text=result[:300],
-                    prompt_metadata=JOB_SEARCH_META,
-                    prompt_breakdown=None,  # No prompt breakdown for API calls
                     
-                    # Quality (Tier 2) - N/A for API calls
-                    quality_evaluation=None,
-                    
-                    # Optimization tracking (Tier 3)
-                    routing_decision=None,  # No LLM routing for API calls
-                    cache_metadata=cache_metadata,  # Added: cache
-                    
-                    # A/B Testing support (Tier 3)
-                    prompt_variant_id=None,  # Added: ready for A/B tests
-                    test_dataset_id=None,  # Added: ready for test runs
-                    
-                    # NEW: Conversation linking
+                    # Conversation linking
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
                     parent_call_id=self.memory.request_id if self.memory else None,
-                    request_id=str(uuid.uuid4()),
+                    request_id=request_id,
                     
-                    # NEW: Observability
+                    # Observability
+                    trace_id=self.memory.conversation_id if self.memory else None,
                     environment=os.getenv("ENVIRONMENT", "development"),
                     
-                    # Metadata
+                    # Metadata - CRITICAL: Include phase
                     metadata={
+                        "phase": CURRENT_PHASE,  # ← CRITICAL for phase tracking
                         "query": query,
                         "location": location,
                         "num_results_requested": num_results,
                         "jobs_found": 0,
                         "is_api_call": True,
-                        "conversation_memory": self.memory,        
-                        "execution_settings": self.exec_settings
                     }
                 )
                 
@@ -206,73 +169,53 @@ class JobPlugin:
                 "jobs": jobs
             })
             
-            # Tier 3: Cache metadata (ready for optimization)
-            cache_metadata = create_cache_metadata(
-                cache_hit=False,
-                cache_key=f"job_search:{query.lower()}:{location.lower()}",
-                cache_cluster_id="job_search"
-            ) if create_cache_metadata else None
-            
-            # Track API call - COMPLETE with all tiers
+            # Track API call with phase metadata
             track_llm_call(
-                # Core metrics (Tier 1)
+                # Core metrics
                 prompt_tokens=0,
                 completion_tokens=0,
                 latency_ms=latency_ms,
                 agent_name="JobPlugin",
-                agent_role="retriever",  # Added: agent role
+                agent_role="retriever",
                 operation="find_jobs",
-                success=True,  # Added: explicit success
+                success=True,
                 
-                # Prompt content (Tier 2)
+                # Prompt content
                 prompt=f"Search: {query} in {location}",
                 response_text=result[:500],
-                prompt_metadata=JOB_SEARCH_META,
-                prompt_breakdown=None,
                 
-                # Quality (Tier 2)
-                quality_evaluation=None,
-                
-                # Optimization tracking (Tier 3)
-                routing_decision=None,
-                cache_metadata=cache_metadata,  # Added: cache
-                
-                # A/B Testing support (Tier 3)
-                prompt_variant_id=None,  # Added
-                test_dataset_id=None,  # Added
-                
-                # NEW: Conversation linking
+                # Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-                    
-                # NEW: Streaming
-                time_to_first_token_ms=None,
+                request_id=request_id,
                 
-                # NEW: Observability
+                # Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
-                # Metadata
+                # Metadata - CRITICAL: Include phase
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL for phase tracking
                     "query": query,
                     "location": location,
                     "num_results_requested": num_results,
                     "jobs_found": len(jobs),
                     "is_api_call": True,
-                    "conversation_memory": self.memory,        
-                    "execution_settings": self.exec_settings
                 }
             )
             
-            print(f"📊 Tracked job search: {latency_ms:.0f}ms, {len(jobs)} jobs found")
+            logger.info(f"📊 Tracked job search: {latency_ms:.0f}ms, {len(jobs)} jobs found")
 
             return result
 
         except Exception as e:
             logger.error(f"Error in JobPlugin.find_jobs: {e}", exc_info=True)
             
-            # Track failed call - COMPLETE
+            # Classify error
+            error_info = classify_error(e, operation="find_jobs")
+            
+            # Track failed call with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -280,40 +223,32 @@ class JobPlugin:
                 agent_name="JobPlugin",
                 agent_role="retriever",
                 operation="find_jobs",
-                success=False,  # Failed
+                success=False,
                 error=str(e),
                 prompt=f"Search: {query} in {location}",
-                prompt_metadata=JOB_SEARCH_META,
-                prompt_breakdown=None,
-                quality_evaluation=None,
-                routing_decision=None,
-                cache_metadata=None,
-                prompt_variant_id=None,
-                test_dataset_id=None,
                 
-                # NEW: Error details
-                **classify_error(e, operation="find_jobs"),
+                # Error details
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # NEW: Conversation linking
+                
+                # Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
+                request_id=request_id,
                 
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                # Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
+                # Metadata - CRITICAL: Include phase
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL for phase tracking
                     "query": query,
                     "location": location,
                     "is_api_call": True,
-                    "error_type": type(e).__name__,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
+                    "error_type": error_info['error_type'],
                 }
             )
             
@@ -337,6 +272,7 @@ class JobPlugin:
         Retrieve details for a specific job from the last search.
         """
         start_time = time.time()
+        request_id = str(uuid.uuid4())
         
         if not self.context or not hasattr(self.context, 'last_searched_jobs'):
             return "❌ No recent job search found. Please search for jobs first."
@@ -357,51 +293,38 @@ class JobPlugin:
         details += f"🔗 **Apply:** {job.get('link', 'No link available')}\n\n"
         details += f"**Description:**\n{job.get('description', 'No description available')}"
         
-        # Track retrieval operation - COMPLETE
+        # Track retrieval operation with phase metadata
         track_llm_call(
-            # Core metrics (Tier 1)
+            # Core metrics
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=(time.time() - start_time) * 1000,
             agent_name="JobPlugin",
-            agent_role="retriever",  # Added
+            agent_role="retriever",
             operation="get_job_details",
-            success=True,  # Added
+            success=True,
             
-            # Prompt content (Tier 2)
+            # Prompt content
             prompt=f"Get details for job #{job_number}",
             response_text=details[:300],
-            prompt_metadata=None,
-            prompt_breakdown=None,
             
-            # Quality (Tier 2)
-            quality_evaluation=None,
-            
-            # Optimization tracking (Tier 3)
-            routing_decision=None,
-            cache_metadata=None,
-            
-            # A/B Testing support (Tier 3)
-            prompt_variant_id=None,
-            test_dataset_id=None,
-
-            # NEW: Conversation linking
+            # Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=str(uuid.uuid4()),    
+            request_id=request_id,
             
-            # NEW: Observability
+            # Observability
+            trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
             
-            # Metadata
+            # Metadata - CRITICAL: Include phase
             metadata={
+                "phase": CURRENT_PHASE,  # ← CRITICAL for phase tracking
                 "job_number": job_number,
                 "job_title": job.get('title'),
                 "job_company": job.get('company'),
                 "is_retrieval": True,
-                "conversation_memory": self.memory,
-                "execution_settings": self.exec_settings
             }
         )
         
@@ -422,6 +345,7 @@ class JobPlugin:
         Save specific jobs or all jobs from the last search.
         """
         start_time = time.time()
+        request_id = str(uuid.uuid4())
         
         if not self.context or not hasattr(self.context, 'last_searched_jobs'):
             return "❌ No recent job search found. Please search for jobs first."
@@ -455,56 +379,43 @@ class JobPlugin:
         else:
             result = f"✅ Saved {len(jobs_to_save)} selected job(s): #{', #'.join(map(str, job_indices))}."
         
-        # Track database write - COMPLETE
+        # Track database write with phase metadata
         track_llm_call(
-            # Core metrics (Tier 1)
+            # Core metrics
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=(time.time() - start_time) * 1000,
             agent_name="JobPlugin",
-            agent_role="writer",  # Added
+            agent_role="writer",
             operation="save_searched_jobs",
-            success=True,  # Added
+            success=True,
             
-            # Prompt content (Tier 2)
+            # Prompt content
             prompt=f"Save jobs: {job_numbers}",
             response_text=result,
-            prompt_metadata=None,
-            prompt_breakdown=None,
             
-            # Quality (Tier 2)
-            quality_evaluation=None,
-            
-            # Optimization tracking (Tier 3)
-            routing_decision=None,
-            cache_metadata=None,
-            
-            # A/B Testing support (Tier 3)
-            prompt_variant_id=None,
-            test_dataset_id=None,
-
-            # NEW: Conversation linking
+            # Conversation linking
             conversation_id=self.memory.conversation_id if self.memory else None,
             turn_number=self.memory.turn_number if self.memory else None,
             parent_call_id=self.memory.request_id if self.memory else None,
-            request_id=str(uuid.uuid4()),
+            request_id=request_id,
             
-            # NEW: Observability
+            # Observability
+            trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
             
-            # Metadata
+            # Metadata - CRITICAL: Include phase
             metadata={
+                "phase": CURRENT_PHASE,  # ← CRITICAL for phase tracking
                 "job_numbers_requested": job_numbers,
                 "jobs_saved": len(jobs_to_save),
                 "query": query,
                 "location": location,
                 "is_db_write": True,
-                "conversation_memory": self.memory,
-                "execution_settings": self.exec_settings
             }
         )
         
-        print(f"📊 Tracked job save: {len(jobs_to_save)} jobs saved")
+        logger.info(f"📊 Tracked job save: {len(jobs_to_save)} jobs saved")
         
         return result
 
@@ -520,6 +431,7 @@ class JobPlugin:
         Retrieve saved jobs from the database.
         """
         start_time = time.time()
+        request_id = str(uuid.uuid4())
         
         try:
             import sqlite3
@@ -544,7 +456,7 @@ class JobPlugin:
                     "jobs": []
                 })
                 
-                # Track database read - COMPLETE
+                # Track database read with phase metadata
                 track_llm_call(
                     prompt_tokens=0,
                     completion_tokens=0,
@@ -555,29 +467,23 @@ class JobPlugin:
                     success=True,
                     prompt=f"Get saved jobs (limit={limit})",
                     response_text=result[:300],
-                    prompt_metadata=None,
-                    prompt_breakdown=None,
-                    quality_evaluation=None,
-                    routing_decision=None,
-                    cache_metadata=None,
-                    prompt_variant_id=None,
-                    test_dataset_id=None,
                     
-                    # NEW: Conversation linking
+                    # Conversation linking
                     conversation_id=self.memory.conversation_id if self.memory else None,
                     turn_number=self.memory.turn_number if self.memory else None,
                     parent_call_id=self.memory.request_id if self.memory else None,
-                    request_id=str(uuid.uuid4()),
-
-                    # NEW: Observability
+                    request_id=request_id,
+                    
+                    # Observability
+                    trace_id=self.memory.conversation_id if self.memory else None,
                     environment=os.getenv("ENVIRONMENT", "development"),
                     
+                    # Metadata - CRITICAL: Include phase
                     metadata={
+                        "phase": CURRENT_PHASE,  # ← CRITICAL for phase tracking
                         "limit": limit,
                         "jobs_returned": 0,
                         "is_db_read": True,
-                        "conversation_memory": self.memory,
-                        "execution_settings": self.exec_settings
                     }
                 )
                 
@@ -599,7 +505,7 @@ class JobPlugin:
                 "jobs": jobs
             })
             
-            # Track database read - COMPLETE
+            # Track database read with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -610,32 +516,23 @@ class JobPlugin:
                 success=True,
                 prompt=f"Get saved jobs (limit={limit})",
                 response_text=result[:300],
-                prompt_metadata=None,
-                prompt_breakdown=None,
-                quality_evaluation=None,
-                routing_decision=None,
-                cache_metadata=None,
-                prompt_variant_id=None,
-                test_dataset_id=None,
                 
-                # NEW: Conversation linking
+                # Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
-
-                # NEW: Streaming
-                time_to_first_token_ms=None,
+                request_id=request_id,
                 
-                # NEW: Observability
+                # Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
+                # Metadata - CRITICAL: Include phase
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL for phase tracking
                     "limit": limit,
                     "jobs_returned": len(jobs),
                     "is_db_read": True,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
                 }
             )
             
@@ -644,7 +541,10 @@ class JobPlugin:
         except Exception as e:
             logger.error(f"Error retrieving saved jobs: {e}", exc_info=True)
             
-            # Track failed call - COMPLETE
+            # Classify error
+            error_info = classify_error(e, operation="get_saved_jobs")
+            
+            # Track failed call with phase metadata
             track_llm_call(
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -655,36 +555,28 @@ class JobPlugin:
                 success=False,
                 error=str(e),
                 prompt=f"Get saved jobs (limit={limit})",
-                prompt_metadata=None,
-                prompt_breakdown=None,
-                quality_evaluation=None,
-                routing_decision=None,
-                cache_metadata=None,
-                prompt_variant_id=None,
-                test_dataset_id=None,
                 
-                # NEW: Error details
-                **classify_error(e, operation="get_saved_jobs"),
+                # Error details
+                error_type=error_info['error_type'],
+                error_code=error_info['error_code'],
                 retry_count=0,
-
-                # NEW: Conversation linking
+                
+                # Conversation linking
                 conversation_id=self.memory.conversation_id if self.memory else None,
                 turn_number=self.memory.turn_number if self.memory else None,
                 parent_call_id=self.memory.request_id if self.memory else None,
-                request_id=str(uuid.uuid4()),
+                request_id=request_id,
                 
-                # NEW: Streaming
-                time_to_first_token_ms=None,
-                
-                # NEW: Observability
+                # Observability
+                trace_id=self.memory.conversation_id if self.memory else None,
                 environment=os.getenv("ENVIRONMENT", "development"),
                 
+                # Metadata - CRITICAL: Include phase
                 metadata={
+                    "phase": CURRENT_PHASE,  # ← CRITICAL for phase tracking
                     "limit": limit,
                     "is_db_read": True,
-                    "error_type": type(e).__name__,
-                    "conversation_memory": self.memory,
-                    "execution_settings": self.exec_settings
+                    "error_type": error_info['error_type'],
                 }
             )
             

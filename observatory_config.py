@@ -28,141 +28,187 @@ UPDATED (Dec 2025): Added chat_history_count auto-extraction for conversation tr
 
 import os
 import re
-import hashlib
-import tiktoken
+import logging
 from typing import Optional, Dict, List, Any
+from pathlib import Path
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 # =============================================================================
-# IMPORT FROM OBSERVATORY SDK
+# OBSERVATORY SDK IMPORTS
 # =============================================================================
 
+# Core components
 from observatory import (
-    # Core
+    # Version
+    __version__ as OBSERVATORY_VERSION,
+    
+    # Core classes
     Observatory,
     ModelProvider,
     AgentRole,
     
-    # SDK Components
+    # Main tracking function (renamed to avoid conflict with wrapper)
+    track_llm_call as _sdk_track_llm_call,
+    
+    # Utilities
+    estimate_tokens,
+)
+
+# Optimization components
+from observatory import (
     LLMJudge,
     CacheManager,
+    PrefixCacheDetector,  
     ModelRouter,
     PromptManager,
-    
-    # Convenience functions (rename to avoid conflict with our wrapper)
-    track_llm_call as _sdk_track_llm_call,
-    create_routing_decision,
-    create_cache_metadata,
-    create_quality_evaluation,
-    create_prompt_metadata,
-    create_prompt_breakdown,
-    estimate_tokens as _sdk_estimate_tokens,
-    
-    # Models for type hints (existing)
+    PromptOptimizer,  
+    BatchDetector,  
+    ParallelDetector,  
+    StreamingDetector,  
+)
+
+# Data models (for type hints)
+from observatory import (
+    LLMCall,
     RoutingDecision,
     CacheMetadata,
     QualityEvaluation,
     PromptBreakdown,
     PromptMetadata,
-    
-    # Additional models for complete schema
     ModelConfig,
     StreamingMetrics,
     ExperimentMetadata,
     ErrorDetails,
-
-    # Semantic Cache
-    SemanticCache,
     SemanticCacheResult,
+)
+
+# Helper functions
+from observatory import (
+    create_routing_decision,
+    create_cache_metadata,
+    create_quality_evaluation,
+    create_prompt_metadata,
+    create_prompt_breakdown,
     create_semantic_cache_metadata,
 )
 
+# Optional: SemanticCache (requires chromadb)
+try:
+    from observatory import SemanticCache
+    SEMANTIC_CACHE_AVAILABLE = True
+except ImportError:
+    SemanticCache = None
+    SEMANTIC_CACHE_AVAILABLE = False
+    logger.warning("⚠️ SemanticCache unavailable - install with: pip install chromadb")
+
 # =============================================================================
-# OVERRIDE: Accurate Token Estimation with tiktoken
+# IMPORT VALIDATION
 # =============================================================================
 
-def estimate_tokens(text: str) -> int:
-    """
-    Accurately estimate tokens using tiktoken (matches Azure OpenAI).
-    
-    Overrides the SDK's rough estimate (len // 4) with precise counting
-    using the same encoding that Azure OpenAI uses internally.
-    
-    This fixes the 74% unknown tokens issue by properly counting large
-    system prompts (~11,000 tokens vs SDK's ~500 estimate).
-    
-    Args:
-        text: Text to tokenize
-        
-    Returns:
-        int: Accurate token count
-    """
-    if not text:
-        return 0
-    
-    try:
-        encoder = tiktoken.encoding_for_model("gpt-4")
-        return len(encoder.encode(text))
-    except Exception as e:
-        print(f"⚠️ tiktoken error: {e}, using fallback estimate")
-        return _sdk_estimate_tokens(text)
+MIN_REQUIRED_VERSION = "0.1.0"
 
-# ✅ ADD THIS TEST BLOCK
-print("="*70)
-print("🧪 TESTING estimate_tokens OVERRIDE")
-test_text = "You are a helpful assistant." * 100  # ~3000 chars
-sdk_estimate = len(test_text) // 4  # Rough estimate: ~750
-tiktoken_actual = estimate_tokens(test_text)
-print(f"   Test text: {len(test_text)} characters")
-print(f"   SDK estimate (len//4): {sdk_estimate}")
-print(f"   Tiktoken actual: {tiktoken_actual}")
-if tiktoken_actual != sdk_estimate:
-    print(f"   ✅ Override IS working! ({abs(tiktoken_actual - sdk_estimate)} token difference)")
-else:
-    print(f"   ❌ Override NOT working! (same result)")
-print("="*70)
+# Validate critical components
+REQUIRED_COMPONENTS = {
+    'Observatory': Observatory,
+    'track_llm_call': _sdk_track_llm_call,
+    'ModelProvider': ModelProvider,
+    'LLMJudge': LLMJudge,
+    'CacheManager': CacheManager,
+}
+
+for name, component in REQUIRED_COMPONENTS.items():
+    if component is None:
+        raise ImportError(f"❌ Critical component '{name}' not available")
+
+# Version check (warning only, not blocking)
+try:
+    if OBSERVATORY_VERSION < MIN_REQUIRED_VERSION:
+        logger.warning(f"⚠️ Observatory {MIN_REQUIRED_VERSION}+ recommended, found {OBSERVATORY_VERSION}")
+except (TypeError, AttributeError):
+    logger.warning(f"⚠️ Could not validate Observatory version")
+
+logger.info(f"✅ Observatory SDK loaded (version: {OBSERVATORY_VERSION})")
 
 # =============================================================================
 # PHASE CONFIGURATION
 # =============================================================================
-
+# Controls whether optimizations are detected (baseline) or applied (optimized)
+#
+# BASELINE MODE (default):
+#   - Track all metrics with full 139-field schema
+#   - Detect optimization opportunities (cache hits, routing, compression)
+#   - Store opportunities in metadata for analysis
+#   - NO changes to application behavior
+#
+# OPTIMIZED MODE:
+#   - Apply all detected optimizations
+#   - Two-tier caching (SQLite exact + ChromaDB semantic)
+#   - Model routing (complexity-based)
+#   - Prompt compression (simple/medium/complex variants)
+#   - Token efficiency (operation-specific max_tokens)
+#
 # Set via environment variable or .env file:
-#   OBSERVATORY_PHASE=baseline   (Phase 1: Track only, no optimizations)
-#   OBSERVATORY_PHASE=optimized  (Phase 2: Routing, caching, quality enabled)
+#   OBSERVATORY_PHASE=baseline   (default - detect only)
+#   OBSERVATORY_PHASE=optimized  (apply optimizations)
 #
 # Or run with: OBSERVATORY_PHASE=optimized python your_app.py
 
 CURRENT_PHASE = os.getenv("OBSERVATORY_PHASE", "baseline")
 
+# Validate phase
 if CURRENT_PHASE not in ("baseline", "optimized"):
-    print(f"⚠️ Invalid OBSERVATORY_PHASE '{CURRENT_PHASE}', defaulting to 'baseline'")
+    logger.warning(f"⚠️ Invalid OBSERVATORY_PHASE '{CURRENT_PHASE}', defaulting to 'baseline'")
     CURRENT_PHASE = "baseline"
 
+# Phase descriptions for clarity
+PHASE_DESCRIPTIONS = {
+    "baseline": "Tracking metrics and detecting optimization opportunities (no changes applied)",
+    "optimized": "Applying optimizations (caching, routing, compression, token efficiency)",
+}
+
+logger.info(f"🎚️ Observatory Phase: {CURRENT_PHASE.upper()}")
+logger.info(f"   {PHASE_DESCRIPTIONS[CURRENT_PHASE]}")
+
 # =============================================================================
-# PROJECT CONFIGURATION - CAREER COPILOT
+# PROJECT CONFIGURATION
 # =============================================================================
+# Universal settings - customize via environment variables or .env file
 
-PROJECT_NAME = "Career Copilot"
+# Project identification
+PROJECT_NAME = os.getenv("PROJECT_NAME", "Career Copilot")
 
-# Model configuration - Azure OpenAI
-DEFAULT_PROVIDER = ModelProvider.AZURE
-DEFAULT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
+# Model configuration
+DEFAULT_PROVIDER = ModelProvider(os.getenv("MODEL_PROVIDER", "azure"))
+DEFAULT_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") or os.getenv("DEFAULT_MODEL", "gpt-4o-mini")
 
-# Database path - use environment variable if set, otherwise fall back to relative path
+# Database configuration
 if 'DATABASE_URL' in os.environ:
+    # Use explicit DATABASE_URL if provided
     OBSERVATORY_DB_PATH = os.environ['DATABASE_URL'].replace('sqlite:///', '')
 else:
-    OBSERVATORY_DB_PATH = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "ai-agent-observatory", "observatory.db")
-    )
+    # Default: observatory.db in parent directory's ai-agent-observatory folder
+    db_dir = os.getenv("OBSERVATORY_DB_DIR", os.path.join(os.path.dirname(__file__), "..", "ai-agent-observatory"))
+    db_name = os.getenv("OBSERVATORY_DB_NAME", "observatory.db")
+    OBSERVATORY_DB_PATH = os.path.abspath(os.path.join(db_dir, db_name))
     os.environ['DATABASE_URL'] = f"sqlite:///{OBSERVATORY_DB_PATH}"
 
-print(f"📦 Observatory Config: {PROJECT_NAME}")
-print(f"   Database: {OBSERVATORY_DB_PATH}")
-print(f"   Model: {DEFAULT_MODEL}")
-print(f"   Phase: {CURRENT_PHASE}")
+# Ensure database directory exists
+Path(OBSERVATORY_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+
+# Log configuration
+logger.info("="*70)
+logger.info(f"📦 Observatory Configuration")
+logger.info(f"   Project: {PROJECT_NAME}")
+logger.info(f"   Provider: {DEFAULT_PROVIDER.value}")
+logger.info(f"   Model: {DEFAULT_MODEL}")
+logger.info(f"   Database: {OBSERVATORY_DB_PATH}")
+logger.info(f"   Phase: {CURRENT_PHASE.upper()}")
+logger.info("="*70)
 
 # =============================================================================
 # INITIALIZE OBSERVATORY
@@ -170,12 +216,16 @@ print(f"   Phase: {CURRENT_PHASE}")
 
 obs = Observatory(
     project_name=PROJECT_NAME,
-    enabled=True,
+    enabled=os.getenv("OBSERVATORY_ENABLED", "true").lower() == "true",
 )
+
+logger.info(f"✅ Observatory initialized (enabled={obs.collector.enabled})")
 
 # =============================================================================
 # CONFIGURE LLM JUDGE - CAREER COPILOT DOMAIN
 # =============================================================================
+# Quality evaluation with LLM-as-judge
+# For other projects: Update operations, criteria, and domain_context
 
 judge = LLMJudge(
     observatory=obs,
@@ -200,11 +250,11 @@ judge = LLMJudge(
         "save_jobs",
         "list_resumes",
         "quick_score_job",
-        "generate_refinements",  # Low-value planning operation
+        "generate_refinements",
     },
     
-    # Evaluate 100% of judge-worthy calls
-    sample_rate=1.0,
+    # Sampling rate (1.0 = evaluate 100% of eligible calls)
+    sample_rate=float(os.getenv("JUDGE_SAMPLE_RATE", "1.0")),
     
     # Career advice domain criteria (must sum to 1.0)
     criteria={
@@ -218,16 +268,29 @@ judge = LLMJudge(
     # Career Copilot domain context
     domain_context="career advice, resume optimization, and job matching",
     
-    # Model for judging (same as main)
-    judge_model=DEFAULT_MODEL,
+    # Model for judging
+    judge_model=os.getenv("JUDGE_MODEL", DEFAULT_MODEL),
     
     # Track judge calls in Observatory
     track_judge_calls=True,
+    
+    # Enable/disable based on phase (optional: disable in baseline to save costs)
+    enabled=os.getenv("JUDGE_ENABLED", "true").lower() == "true",
 )
+
+logger.info(f"✅ LLMJudge configured (enabled={judge.enabled}, sample_rate={judge.sample_rate})")
+logger.info(f"   Evaluating: {len(judge.operations)} operations")
+logger.info(f"   Skipping: {len(judge.skip_operations)} operations")
 
 # =============================================================================
 # CONFIGURE CACHE MANAGER - CAREER COPILOT OPERATIONS
 # =============================================================================
+# Exact hash-based caching with TTL
+# 
+# BASELINE MODE: Detects exact match opportunities (logs would-be hits)
+# OPTIMIZED MODE: Returns cached responses for exact matches
+#
+# For other projects: Update operations with appropriate TTL and clustering
 
 cache = CacheManager(
     observatory=obs,
@@ -256,10 +319,60 @@ cache = CacheManager(
     },
     
     # Defaults
-    default_ttl=3600,       # 1 hour default
-    max_entries=1000,       # Max cache size
-    normalize_prompts=True, # Normalize for better cache hits
+    default_ttl=int(os.getenv("CACHE_DEFAULT_TTL", "3600")),
+    max_entries=int(os.getenv("CACHE_MAX_ENTRIES", "1000")),
+    normalize_prompts=os.getenv("CACHE_NORMALIZE", "true").lower() == "true",
+    
+    # Enable in both phases (behavior differs based on detection_only)
+    enabled=os.getenv("CACHE_ENABLED", "true").lower() == "true",
+    
+    # NEW: Detection-only mode for baseline
+    # Baseline: Check cache, track opportunities, DON'T return cached responses
+    # Optimized: Return cached responses
+    detection_only=(CURRENT_PHASE == "baseline"),
 )
+
+logger.info(f"✅ CacheManager configured (enabled={cache.enabled})")
+if cache.enabled:
+    mode = "detection only (tracking opportunities)" if cache.detection_only else "active caching"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Caching: {len(cache.operations)} operations")
+    logger.info(f"   Default TTL: {cache.default_ttl}s, Max entries: {cache.max_entries}")
+
+# =============================================================================
+# CONFIGURE PREFIX CACHE DETECTOR - AZURE/ANTHROPIC PREFIX CACHING
+# =============================================================================
+# Detects opportunities for Azure/Anthropic prefix caching (~50% cost savings on cached prefix)
+#
+# BASELINE MODE: Tracks prefix reuse and calculates potential savings
+# OPTIMIZED MODE: Application code can use Azure/Anthropic prefix caching API
+#
+# Perfect for large system prompts that rarely change (like Career Copilot's 1,555 token prompt)
+
+prefix_cache = PrefixCacheDetector(
+    observatory=obs,
+    
+    # Track first 500 characters as prefix (captures system prompt start)
+    prefix_length=500,
+    
+    # Only track prompts with 100+ tokens (smaller prompts don't benefit)
+    min_prefix_tokens=100,
+    
+    # Enable in both phases
+    enabled=os.getenv("PREFIX_CACHE_ENABLED", "true").lower() == "true",
+    
+    # Detection-only mode for baseline
+    # Baseline: Track prefix reuse, calculate savings, DON'T apply caching
+    # Optimized: Application can use Azure/Anthropic prefix caching API
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ PrefixCacheDetector configured (enabled={prefix_cache.enabled})")
+if prefix_cache.enabled:
+    mode = "detection only (tracking opportunities)" if prefix_cache.detection_only else "API integration ready"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Prefix length: {prefix_cache.prefix_length} chars")
+    logger.info(f"   Min tokens: {prefix_cache.min_prefix_tokens}")
 
 # =============================================================================
 # CONFIGURE SEMANTIC CACHE - VECTOR-BASED SIMILARITY MATCHING
@@ -267,66 +380,91 @@ cache = CacheManager(
 # Unlike CacheManager (exact hash match), SemanticCache uses embeddings to find
 # semantically similar prompts. "Find Python jobs" ≈ "Search for Python positions"
 #
-# pip install chromadb  (required dependency)
+# BASELINE MODE: Detects semantic similarity opportunities (logs would-be hits)
+# OPTIMIZED MODE: Actually returns cached responses
+#
+# Requires: pip install chromadb
+# For other projects: Update operations with domain-specific similarity thresholds
 
-semantic_cache = SemanticCache(
-    observatory=obs,
-    
-    operations={
-        # ═══════════════════════════════════════════════════════════════
-        # HIGH VALUE - SQL Generation
-        # ═══════════════════════════════════════════════════════════════
-        # Users ask similar questions in different ways:
-        #   "show me jobs from Deloitte" ≈ "find Deloitte jobs" ≈ "Deloitte positions"
-        # 
-        # Analysis showed ~20% duplicate patterns in generate_sql
-        "generate_sql": {
-            "ttl": 86400,       # 24 hours (SQL patterns are stable)
-            "threshold": 0.95,  # 95% - high precision (exact SQL matters)
-            "cluster_id": "sql_generation",
+# Only initialize if ChromaDB is available
+if SEMANTIC_CACHE_AVAILABLE:
+    semantic_cache = SemanticCache(
+        observatory=obs,
+        
+        operations={
+            # ═══════════════════════════════════════════════════════════════
+            # HIGH VALUE - SQL Generation
+            # ═══════════════════════════════════════════════════════════════
+            "generate_sql": {
+                "ttl": 86400,       # 24 hours (SQL patterns are stable)
+                "threshold": 0.95,  # 95% - high precision (exact SQL matters)
+                "cluster_id": "sql_generation",
+            },
+            
+            # ═══════════════════════════════════════════════════════════════
+            # HIGH VALUE - Quick Scoring
+            # ═══════════════════════════════════════════════════════════════
+            "quick_score_job": {
+                "ttl": 3600,        # 1 hour (job relevance can change)
+                "threshold": 0.90,  # 90% - jobs in same domain match well
+                "cluster_id": "resume_matching",
+            },
+            
+            # ═══════════════════════════════════════════════════════════════
+            # MEDIUM VALUE - Deep Analysis
+            # ═══════════════════════════════════════════════════════════════
+            "deep_analyze_job": {
+                "ttl": 3600,        # 1 hour
+                "threshold": 0.88,  # 88% - lower threshold for expensive ops
+                "cluster_id": "deep_analysis",
+            },
         },
         
-        # ═══════════════════════════════════════════════════════════════
-        # HIGH VALUE - Quick Scoring
-        # ═══════════════════════════════════════════════════════════════
-        # Same resume scored against many similar jobs:
-        #   "Python Developer at Google" ≈ "Python Engineer at Meta"
-        #
-        # High volume operation - significant savings potential
-        "quick_score_job": {
-            "ttl": 3600,        # 1 hour (job relevance can change)
-            "threshold": 0.90,  # 90% - jobs in same domain match well
-            "cluster_id": "resume_matching",
-        },
+        # Defaults for any operation not explicitly configured
+        default_ttl=int(os.getenv("SEMANTIC_CACHE_DEFAULT_TTL", "3600")),
+        default_threshold=float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.92")),
         
-        # ═══════════════════════════════════════════════════════════════
-        # MEDIUM VALUE - Deep Analysis
-        # ═══════════════════════════════════════════════════════════════
-        # Expensive operation (~2000+ tokens per call)
-        # Worth caching aggressively with lower threshold
-        "deep_analyze_job": {
-            "ttl": 3600,        # 1 hour
-            "threshold": 0.88,  # 88% - lower threshold for expensive ops
-            "cluster_id": "deep_analysis",
-        },
-    },
+        # Enable in both modes (behavior differs based on detection_only)
+        enabled=os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() == "true",
+        
+        # ✅ NEW: Detection-only mode for baseline
+        # Baseline: Calculate similarity, track opportunities, DON'T return cached responses
+        # Optimized: Return cached responses
+        detection_only=(CURRENT_PHASE == "baseline"),
+    )
     
-    # Defaults for any operation not explicitly configured
-    default_ttl=3600,
-    default_threshold=0.92,
-    
-    # Master switch - set to False to disable without removing config
-    enabled=False,
-)
+    logger.info(f"✅ SemanticCache configured (enabled={semantic_cache.enabled})")
+    if semantic_cache.enabled:
+        mode = "detection only (tracking opportunities)" if semantic_cache.detection_only else "active caching"
+        logger.info(f"   Mode: {mode}")
+        logger.info(f"   Semantic matching: {len(semantic_cache.operations)} operations")
+        logger.info(f"   Default threshold: {semantic_cache.default_threshold}")
+else:
+    semantic_cache = None
+    logger.info("⏭️  SemanticCache skipped (ChromaDB not available)")
 
 # =============================================================================
 # CONFIGURE MODEL ROUTER - CAREER COPILOT ROUTING RULES
 # =============================================================================
+# Intelligent model selection based on complexity, operation, and token count
+#
+# BASELINE MODE: Calculates routing opportunities (logs would-be upgrades/downgrades)
+# OPTIMIZED MODE: Actually routes to different models
+#
+# For other projects: Update rules to match your operations and model strategy
 
 router = ModelRouter(
     observatory=obs,
     default_model=DEFAULT_MODEL,
-    fallback_model="gpt-4o-mini",
+    fallback_model=os.getenv("FALLBACK_MODEL", "gpt-4o-mini"),
+    
+    # Enable in both phases (behavior differs based on detection_only)
+    enabled=os.getenv("ROUTER_ENABLED", "true").lower() == "true",
+    
+    # ✅ NEW: Detection-only mode for baseline
+    # Baseline: Calculate routing decision, log opportunities, return default_model
+    # Optimized: Actually return routed model
+    detection_only=(CURRENT_PHASE == "baseline"),
     
     # Routing rules for Career Copilot operations (evaluated in order)
     rules=[
@@ -380,13 +518,26 @@ router = ModelRouter(
     ],
 )
 
+logger.info(f"✅ ModelRouter configured (enabled={router.enabled})")
+if router.enabled:
+    mode = "detection only (tracking opportunities)" if router.detection_only else "active routing"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Default model: {router.default_model}")
+    logger.info(f"   Fallback model: {router.fallback_model}")
+    logger.info(f"   Routing rules: {len(router._rules)}")
+
 # =============================================================================
 # CONFIGURE PROMPT MANAGER (A/B TESTING)
 # =============================================================================
+# Template versioning and A/B testing for prompts
+# Works identically in both baseline and optimized phases
+# For other projects: Register your prompt templates with variants
 
 prompts = PromptManager(observatory=obs)
 
 # Example: Register system prompt with variants for Career Copilot
+# Uncomment and customize as needed:
+#
 # prompts.register(
 #     template_id="career_copilot_system",
 #     version="2.0.0",
@@ -401,14 +552,203 @@ prompts = PromptManager(observatory=obs)
 #     description="Testing different system prompt styles for career advice",
 # )
 
+logger.info(f"✅ PromptManager configured")
+logger.info(f"   Templates registered: {len(prompts.list_templates())}")
+logger.info(f"   Note: A/B testing works in both baseline and optimized phases")
 
 # =============================================================================
-# HELPER FUNCTIONS: Error Classification & Cache Key Generation
+# PROMPT VARIANTS - CAREER COPILOT
+# =============================================================================
+# Define 3 prompt variants for compression optimization
+# System prompt is 99.8% of input tokens (1,555 avg) - huge optimization opportunity!
+#
+# For other projects: Replace with your prompt variants
+
+# TODO: Define your actual prompts here
+# FULL_SYSTEM_PROMPT = """Your complete 11K token system prompt..."""
+# SIMPLE_SYSTEM_PROMPT = """Compressed 50-token version for simple tasks..."""
+# MEDIUM_SYSTEM_PROMPT = """Compressed 200-token version for medium tasks..."""
+
+# Prompt variant configuration
+PROMPT_VARIANTS = {
+    "simple": {
+        "content": "You are a helpful career advisor. Provide concise responses.",  # Placeholder - replace with actual
+        "max_tokens": 150,
+        "description": "Minimal prompt for simple tasks (quick scoring, lists)"
+    },
+    "medium": {
+        "content": "You are an experienced career advisor specializing in resume optimization and job matching.",  # Placeholder
+        "max_tokens": 500,
+        "description": "Medium prompt for structured tasks (SQL generation, bullet improvements)"
+    },
+    "complex": {
+        "content": "REPLACE_WITH_FULL_SYSTEM_PROMPT",  # TODO: Use your actual full system prompt
+        "max_tokens": 1000,
+        "description": "Full system prompt for complex analysis"
+    },
+}
+
+# Map operations to complexity levels
+OPERATION_COMPLEXITY = {
+    # Simple operations (use 50-token prompt)
+    "quick_score_job": "simple",
+    "list_resumes": "simple",
+    "find_jobs": "simple",
+    "get_job_details": "simple",
+    "get_saved_jobs": "simple",
+    
+    # Medium operations (use 200-token prompt)
+    "generate_sql": "medium",
+    "improve_bullet": "medium",
+    "query_database": "medium",
+    "generate_change_report": "medium",
+    
+    # Complex operations (use full prompt)
+    "deep_analyze_job": "complex",
+    "deep_analyze_with_guidance": "complex",
+    "critique_match": "complex",
+    "refine_analysis": "complex",
+    "streamlit_chat": "complex",
+    "cli_chat_message": "complex",
+}
+
+logger.info(f"✅ Prompt variants defined")
+logger.info(f"   Variants: {', '.join(PROMPT_VARIANTS.keys())}")
+logger.info(f"   Operations mapped: {len(OPERATION_COMPLEXITY)}")
+
+# =============================================================================
+# CONFIGURE PROMPT OPTIMIZER
+# =============================================================================
+# Reduces input tokens through prompt compression and operation-specific max_tokens
+#
+# BASELINE MODE: Detects compression opportunities (logs potential savings)
+# OPTIMIZED MODE: Returns compressed prompts based on operation complexity
+#
+# Expected savings: 77% token reduction on input (1,555 → 350 avg)
+
+prompt_optimizer = PromptOptimizer(
+    observatory=obs,
+    
+    # Prompt variants with max_tokens limits
+    prompt_variants=PROMPT_VARIANTS,
+    
+    # Operation → complexity mapping
+    operation_complexity=OPERATION_COMPLEXITY,
+    
+    # Enable in both phases
+    enabled=os.getenv("PROMPT_OPTIMIZER_ENABLED", "true").lower() == "true",
+    
+    # Detection-only mode for baseline
+    # Baseline: Calculate savings, log opportunities, return default prompt
+    # Optimized: Return compressed prompt variant
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ PromptOptimizer configured (enabled={prompt_optimizer.enabled})")
+if prompt_optimizer.enabled:
+    mode = "detection only (tracking savings)" if prompt_optimizer.detection_only else "active compression"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Variants: {len(PROMPT_VARIANTS)}")
+    logger.info(f"   Operations: {len(OPERATION_COMPLEXITY)}")
+
+# =============================================================================
+# EXECUTION OPTIMIZATION
+# =============================================================================
+# Detects opportunities for batching, parallelism, and streaming
+#
+# BASELINE MODE: Identifies patterns and calculates potential savings
+# OPTIMIZED MODE: Application code can implement batching/parallel/streaming
+#
+# Expected savings: 60% latency reduction from batching, 50-70% from parallelism
+
+# Batch Detector - Groups rapid sequential calls
+batch_detector = BatchDetector(
+    observatory=obs,
+    
+    # Group calls within 100ms window
+    time_window_ms=100,
+    
+    # At least 2 calls to qualify as batch
+    min_batch_size=2,
+    
+    # Monitor specific operations (None = all operations)
+    operations={"quick_score_job", "generate_sql", "find_jobs"},
+    
+    # Enable in both phases
+    enabled=os.getenv("BATCH_DETECTOR_ENABLED", "true").lower() == "true",
+    
+    # Detection-only mode for baseline
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ BatchDetector configured (enabled={batch_detector.enabled})")
+if batch_detector.enabled:
+    mode = "detection only (tracking opportunities)" if batch_detector.detection_only else "implementation ready"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Time window: {batch_detector.time_window_ms}ms")
+    logger.info(f"   Min batch size: {batch_detector.min_batch_size}")
+
+# Parallel Detector - Identifies independent operations
+parallel_detector = ParallelDetector(
+    observatory=obs,
+    
+    # Look for parallelism within 5 second window
+    time_window_s=5.0,
+    
+    # At least 2 calls to parallelize
+    min_parallel_count=2,
+    
+    # Enable in both phases
+    enabled=os.getenv("PARALLEL_DETECTOR_ENABLED", "true").lower() == "true",
+    
+    # Detection-only mode for baseline
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ ParallelDetector configured (enabled={parallel_detector.enabled})")
+if parallel_detector.enabled:
+    mode = "detection only (tracking opportunities)" if parallel_detector.detection_only else "implementation ready"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Time window: {parallel_detector.time_window_s}s")
+    logger.info(f"   Min parallel count: {parallel_detector.min_parallel_count}")
+
+# Streaming Detector - Flags high-latency or large-output calls
+streaming_detector = StreamingDetector(
+    observatory=obs,
+    
+    # Flag calls over 2 seconds
+    latency_threshold_ms=2000,
+    
+    # Flag outputs over 500 tokens
+    token_threshold=500,
+    
+    # Monitor specific operations (None = all operations)
+    operations={"deep_analyze_job", "deep_analyze_with_guidance", "critique_match", "streamlit_chat"},
+    
+    # Enable in both phases
+    enabled=os.getenv("STREAMING_DETECTOR_ENABLED", "true").lower() == "true",
+    
+    # Detection-only mode for baseline
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ StreamingDetector configured (enabled={streaming_detector.enabled})")
+if streaming_detector.enabled:
+    mode = "detection only (flagging candidates)" if streaming_detector.detection_only else "implementation ready"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Latency threshold: {streaming_detector.latency_threshold_ms}ms")
+    logger.info(f"   Token threshold: {streaming_detector.token_threshold}")
+
+# =============================================================================
+# HELPER FUNCTIONS
 # =============================================================================
 
 def classify_error(error: Exception, operation: str = None) -> dict:
     """
-    Classify errors for tracking. Returns dict with error_type, error_code, error_category.
+    Classify errors for tracking. Returns dict with error_type, error_code.
+    
+    Universal error classifier - works across different LLM providers and application types.
+    Add project-specific patterns at the end for custom error handling.
     
     Use with ** unpacking in track_llm_call:
         track_llm_call(
@@ -419,13 +759,15 @@ def classify_error(error: Exception, operation: str = None) -> dict:
         )
     
     Categories:
-        - database_schema: Column/table not found errors
-        - database: Other database errors
-        - network: Timeout errors
-        - throttling: Rate limit errors
-        - data_missing: Not found errors
-        - input_error: Validation errors
-        - response_format: JSON parse errors
+        - authentication: API key, auth token errors
+        - throttling: Rate limit, quota errors
+        - network: Timeout, connection errors
+        - llm_provider: Provider-specific errors (context length, content filter)
+        - database: Database operation errors
+        - database_schema: Schema/structure errors
+        - data_missing: Not found, missing data
+        - input_error: Validation, malformed input
+        - response_format: Parsing, JSON decode errors
         - unclassified: Unknown errors
     
     Args:
@@ -433,219 +775,91 @@ def classify_error(error: Exception, operation: str = None) -> dict:
         operation: Optional operation name for context
         
     Returns:
-        Dict with error_type, error_code, error_category
+        Dict with error_type, error_code
     """
     error_str = str(error).lower()
     error_type = type(error).__name__
     
-    # Database schema errors (e.g., "no such column: salary")
-    if "no such column" in error_str or "no such table" in error_str:
-        return {
-            "error_type": error_type,
-            "error_code": "SCHEMA_ERROR",
-            "error_category": "database_schema"
-        }
-    
-    # Timeout errors
-    elif "timeout" in error_str or "timed out" in error_str:
-        return {
-            "error_type": error_type,
-            "error_code": "TIMEOUT",
-            "error_category": "network"
-        }
-    
-    # Rate limiting
-    elif "rate limit" in error_str or "429" in error_str:
-        return {
-            "error_type": error_type,
-            "error_code": "RATE_LIMIT",
-            "error_category": "throttling"
-        }
-    
-    # Not found errors
-    elif re.search(r"not found|no .* found", error_str):
-        return {
-            "error_type": error_type,
-            "error_code": "NOT_FOUND",
-            "error_category": "data_missing"
-        }
-    
-    # Validation errors
-    elif "invalid" in error_str or "validation" in error_str:
-        return {
-            "error_type": error_type,
-            "error_code": "VALIDATION",
-            "error_category": "input_error"
-        }
-    
-    # JSON parse errors
-    elif "json" in error_str or "parse" in error_str or "decode" in error_str:
-        return {
-            "error_type": error_type,
-            "error_code": "PARSE_ERROR",
-            "error_category": "response_format"
-        }
-    
-    # SQLite specific (catch-all for other DB errors)
-    elif "sqlite" in error_type.lower() or "database" in error_str:
-        return {
-            "error_type": error_type,
-            "error_code": "DB_ERROR",
-            "error_category": "database"
-        }
-    
-    # Connection errors
-    elif "connection" in error_str or "connect" in error_str:
-        return {
-            "error_type": error_type,
-            "error_code": "CONNECTION_ERROR",
-            "error_category": "network"
-        }
-    
-    # Authentication errors
-    elif "auth" in error_str or "unauthorized" in error_str or "401" in error_str:
+    # Authentication errors (universal - all providers)
+    if any(x in error_str for x in ["api key", "api_key", "unauthorized", "401", "authentication failed"]):
         return {
             "error_type": error_type,
             "error_code": "AUTH_ERROR",
-            "error_category": "authentication"
         }
     
-    # Default - unclassified
+    # Throttling errors (universal - all providers)
+    elif any(x in error_str for x in ["rate limit", "429", "quota exceeded", "too many requests"]):
+        return {
+            "error_type": error_type,
+            "error_code": "RATE_LIMIT",
+        }
+    
+    # Network errors (universal)
+    elif any(x in error_str for x in ["timeout", "timed out", "connection", "network"]):
+        return {
+            "error_type": error_type,
+            "error_code": "TIMEOUT" if "timeout" in error_str else "CONNECTION_ERROR",
+        }
+    
+    # LLM provider errors (OpenAI, Azure, Anthropic, etc.)
+    elif any(x in error_str for x in ["context length", "token limit", "max tokens", "context_length"]):
+        return {
+            "error_type": error_type,
+            "error_code": "CONTEXT_LENGTH_EXCEEDED",
+        }
+    
+    elif any(x in error_str for x in ["content filter", "content_filter", "policy violation"]):
+        return {
+            "error_type": error_type,
+            "error_code": "CONTENT_FILTER",
+        }
+    
+    elif any(x in error_str for x in ["model not found", "deployment not found", "invalid model"]):
+        return {
+            "error_type": error_type,
+            "error_code": "MODEL_NOT_FOUND",
+        }
+    
+    # Database errors (universal - SQLite, PostgreSQL, MySQL, etc.)
+    elif any(x in error_str for x in ["no such column", "no such table", "unknown column", "unknown table"]):
+        return {
+            "error_type": error_type,
+            "error_code": "SCHEMA_ERROR",
+        }
+    
+    elif any(x in error_type.lower() for x in ["sqlite", "psycopg", "mysql", "database"]) or "database" in error_str:
+        return {
+            "error_type": error_type,
+            "error_code": "DB_ERROR",
+        }
+    
+    # Data errors (universal)
+    elif re.search(r"not found|no .* found|404", error_str):
+        return {
+            "error_type": error_type,
+            "error_code": "NOT_FOUND",
+        }
+    
+    # Input validation errors (universal)
+    elif any(x in error_str for x in ["invalid", "validation", "malformed", "bad request", "400"]):
+        return {
+            "error_type": error_type,
+            "error_code": "VALIDATION_ERROR",
+        }
+    
+    # Response format errors (universal)
+    elif any(x in error_str for x in ["json", "parse", "decode", "unmarshal", "serialization"]):
+        return {
+            "error_type": error_type,
+            "error_code": "PARSE_ERROR",
+        }
+    
+    # Unclassified (catch-all)
     else:
         return {
             "error_type": error_type,
             "error_code": "UNKNOWN",
-            "error_category": "unclassified"
         }
-
-
-def generate_cache_key(operation: str, *key_parts) -> str:
-    """
-    Generate a cache key from operation + identifying content.
-    
-    Creates a deterministic hash that can be used to:
-    1. Identify duplicate calls (same key = potential cache hit)
-    2. Track cache performance
-    3. Enable semantic caching when activated
-    
-    Usage:
-        # For resume-job matching
-        cache_key = generate_cache_key("quick_score_job", resume_text[:500], job.get('id'))
-        
-        # For SQL generation
-        cache_key = generate_cache_key("generate_sql", question)
-        
-        # For deep analysis
-        cache_key = generate_cache_key("deep_analyze_job", resume_text[:500], job.get('id'))
-    
-    Args:
-        operation: The operation name (e.g., "quick_score_job", "generate_sql")
-        *key_parts: Variable arguments that uniquely identify this call
-                   (e.g., resume text, job ID, user query)
-    
-    Returns:
-        16-character hex hash string
-    """
-    # Combine operation with key parts, truncating each part to avoid huge keys
-    combined = f"{operation}:" + ":".join(str(p)[:500] for p in key_parts if p)
-    return hashlib.md5(combined.encode()).hexdigest()[:16]
-
-
-def calculate_complexity_score(user_message: str, tool_call_count: int = 0) -> float:
-    """
-    Calculate query complexity score (0.0 - 1.0) for model routing decisions.
-    
-    Higher scores indicate more complex queries that may benefit from 
-    premium models. Lower scores suggest simpler queries suitable for 
-    cheaper models.
-    
-    Used by:
-    - Model routing: Route simple queries to gpt-4o-mini, complex to gpt-4o
-    - Cost optimization: Identify over-provisioned calls
-    - Dashboard Story 3: Routing analysis
-    
-    Usage:
-        complexity = calculate_complexity_score(user_message, tool_count=2)
-        routing_decision = create_routing_decision(
-            chosen_model="gpt-4o-mini",
-            complexity_score=complexity,
-            ...
-        )
-    
-    Args:
-        user_message: The user's input message
-        tool_count: Number of tools/functions called (higher = more complex)
-    
-    Returns:
-        Float between 0.0 (simple) and 1.0 (complex)
-    """
-    if not user_message:
-        return 0.0
-    
-    score = 0.0
-    message_lower = user_message.lower()
-    
-    # Length factor (longer messages tend to be more complex)
-    score += min(0.3, len(user_message) / 1000)
-    
-    # Simple patterns reduce complexity
-    simple_patterns = ['what is', 'who is', 'when', 'where', 'how many', 'list', 'show me', 'find']
-    if any(p in message_lower for p in simple_patterns):
-        score -= 0.1
-    
-    # Complex patterns increase complexity
-    complex_patterns = ['analyze', 'compare', 'evaluate', 'explain why', 'recommend', 
-                        'improve', 'critique', 'summarize', 'synthesize', 'create']
-    if any(p in message_lower for p in complex_patterns):
-        score += 0.2
-    
-    # Multi-step requests are more complex
-    multi_step_patterns = ['then', 'after that', 'also', 'and then', 'finally']
-    if any(p in message_lower for p in multi_step_patterns):
-        score += 0.15
-    
-    # Tool usage suggests complexity
-    score += min(0.3, tool_call_count * 0.1)
-    
-    # Clamp to valid range
-    return max(0.0, min(1.0, score))
-
-
-def calculate_prefix_hash(system_prompt: str, static_content: str = "") -> str:
-    """
-    Hash the static prefix portion of a prompt for prefix caching detection.
-    
-    Many LLM calls share identical prefixes (system prompt + context) but differ
-    only in the variable portion (e.g., different job descriptions). This hash
-    identifies shared prefixes to detect caching opportunities.
-    
-    Used by:
-    - Prefix cache detection: Find calls with identical prefixes
-    - Cost optimization: Recommend prompt prefix caching
-    - Dashboard Story 2: Cache opportunity analysis
-    
-    Usage:
-        # In quick_score_job - resume is static, job varies
-        prefix_hash = calculate_prefix_hash(SYSTEM_PROMPT, resume_text)
-        
-        track_llm_call(
-            prompt_prefix_hash=prefix_hash,
-            ...
-        )
-    
-    Args:
-        system_prompt: The system prompt text
-        static_content: Other static content (e.g., resume text that doesn't change)
-    
-    Returns:
-        16-character hex hash string
-    """
-    prefix = f"{system_prompt}\n{static_content}"
-    return hashlib.md5(prefix.encode()).hexdigest()[:16]
-
-# =============================================================================
-# HELPER FUNCTIONS: Token Breakdown & Model Parameters Extraction
-# =============================================================================
 
 def extract_token_breakdown_from_messages(
     messages: List[Dict] = None,
@@ -654,33 +868,64 @@ def extract_token_breakdown_from_messages(
     chat_history: Any = None,
     conversation_memory: Any = None,
 ) -> Dict[str, int]:
-    """Extract token breakdown from various message formats.
+    """
+    Extract token breakdown from various message formats.
     
-    Auto-populates system_prompt_tokens, user_message_tokens, chat_history_tokens,
-    chat_history_count, and conversation_context_tokens for comprehensive token tracking.
+    Universal function - works with:
+    - OpenAI/Azure message format: [{"role": "system", "content": "..."}, ...]
+    - Anthropic message format: Similar structure
+    - LangChain messages: Convertible to dict format
+    - Semantic Kernel ChatHistory: Has .messages attribute
+    - Custom ConversationMemory: Has .chat_history or .get_context_for_prompt()
+    
+    Auto-populates token fields for comprehensive tracking:
+    - system_prompt_tokens
+    - user_message_tokens
+    - chat_history_tokens
+    - chat_history_count (number of messages in history)
+    - conversation_context_tokens
     
     Args:
-        messages: Full messages array (OpenAI/SK format)
-        system_prompt: System prompt text
-        user_message: User message text
-        chat_history: Semantic Kernel ChatHistory object
-        conversation_memory: ConversationMemory object
+        messages: Full messages array (OpenAI/Azure/Anthropic format)
+        system_prompt: System prompt text (alternative to messages)
+        user_message: User message text (alternative to messages)
+        chat_history: ChatHistory object (Semantic Kernel format)
+        conversation_memory: ConversationMemory object (custom format)
         
     Returns:
-        Dict with all token breakdown fields"""
+        Dict with all token breakdown fields
+        
+    Example:
+        # From OpenAI messages
+        breakdown = extract_token_breakdown_from_messages(
+            messages=[
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "Help me"}
+            ]
+        )
+        # Returns: {
+        #   "system_prompt_tokens": 3,
+        #   "user_message_tokens": 2,  # Last user message
+        #   "chat_history_tokens": 5,  # Previous messages
+        #   "chat_history_count": 2,   # 1 user + 1 assistant
+        #   "conversation_context_tokens": 0
+        # }
+    """
     
     breakdown = {
         'system_prompt_tokens': 0,
         'user_message_tokens': 0,
         'chat_history_tokens': 0,
-        'chat_history_count': 0,  # ✅ CHANGE 1: Added chat_history_count
+        'chat_history_count': 0,
         'conversation_context_tokens': 0,
     }
     
-    # Method 1: Extract from messages array (OpenAI/Azure format)
+    # METHOD 1: Extract from messages array (OpenAI/Azure/Anthropic)
     if messages:
         user_messages = []
-        assistant_messages = []  # Track separately for count
+        assistant_messages = []
         
         for msg in messages:
             role = msg.get('role', '')
@@ -689,10 +934,12 @@ def extract_token_breakdown_from_messages(
             
             if role == 'system':
                 breakdown['system_prompt_tokens'] += tokens
+            
             elif role == 'user':
-                user_messages.append((content, tokens))  # Store all user messages
-            elif role in ['assistant', 'function']:
-                assistant_messages.append((content, tokens))  # Store for counting
+                user_messages.append((content, tokens))
+            
+            elif role in ['assistant', 'function', 'tool']:
+                assistant_messages.append((content, tokens))
                 breakdown['chat_history_tokens'] += tokens
         
         # Last user message is current, rest go to history
@@ -704,11 +951,11 @@ def extract_token_breakdown_from_messages(
             for content, tokens in user_messages[:-1]:
                 breakdown['chat_history_tokens'] += tokens
         
-        # ✅ CHANGE 2: Calculate chat_history_count
-        # Count = previous user messages + all assistant messages
+        # Calculate chat_history_count = previous user messages + all assistant messages
         breakdown['chat_history_count'] = (len(user_messages) - 1) + len(assistant_messages)
     
-    # Method 2: Extract from individual strings
+
+    # METHOD 2: Extract from individual strings
     else:
         if system_prompt:
             breakdown['system_prompt_tokens'] = estimate_tokens(system_prompt)
@@ -716,7 +963,7 @@ def extract_token_breakdown_from_messages(
         if user_message:
             breakdown['user_message_tokens'] = estimate_tokens(user_message)
         
-        # Method 3: Extract from Semantic Kernel ChatHistory
+        # METHOD 3: Extract from Semantic Kernel ChatHistory
         if chat_history:
             try:
                 if hasattr(chat_history, 'messages'):
@@ -731,11 +978,12 @@ def extract_token_breakdown_from_messages(
                     breakdown['chat_history_tokens'] = history_tokens
                     breakdown['chat_history_count'] = history_count
             except Exception:
-                pass  # Silent fail
+                pass  # Silent fail - not critical
 
-        # Also try from conversation_memory if it has chat_history stored
-        if not breakdown['chat_history_tokens'] and conversation_memory:
+        # METHOD 4: Extract from ConversationMemory
+        if conversation_memory:
             try:
+                # Try chat_history attribute
                 if hasattr(conversation_memory, 'chat_history'):
                     history = conversation_memory.chat_history
                     if hasattr(history, 'messages'):
@@ -748,21 +996,16 @@ def extract_token_breakdown_from_messages(
                                 history_count += 1
                         breakdown['chat_history_tokens'] = history_tokens
                         breakdown['chat_history_count'] = history_count
+                
+                # Try get_context_for_prompt method
+                if hasattr(conversation_memory, 'get_context_for_prompt'):
+                    context_text = conversation_memory.get_context_for_prompt()
+                    if context_text and context_text != "No prior context.":
+                        breakdown['conversation_context_tokens'] = estimate_tokens(context_text)
             except Exception:
-                pass  # Silent fail
-    
-    # Method 4: Extract from ConversationMemory context
-    if conversation_memory:
-        try:
-            if hasattr(conversation_memory, 'get_context_for_prompt'):
-                context_text = conversation_memory.get_context_for_prompt()
-                if context_text and context_text != "No prior context.":
-                    breakdown['conversation_context_tokens'] = estimate_tokens(context_text)
-        except Exception:
-            pass  # Silent fail
+                pass  # Silent fail - not critical
     
     return breakdown
-
 
 def extract_model_parameters(
     client: Any = None,
@@ -770,21 +1013,52 @@ def extract_model_parameters(
     temperature: float = None,
     max_tokens: int = None,
     top_p: float = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
     Extract model parameters from various sources.
     
-    Tries to extract from execution_settings (Semantic Kernel) or client object.
+    Universal function - works with:
+    - OpenAI/Azure OpenAI clients
+    - Anthropic clients
+    - Semantic Kernel execution_settings
+    - LangChain model configs
+    - Direct parameter values (highest priority)
+    
+    Extraction priority:
+    1. Explicit parameters (temperature, max_tokens, top_p passed directly)
+    2. execution_settings object (Semantic Kernel)
+    3. client object (OpenAI/Anthropic style)
+    4. kwargs (catch-all for other frameworks)
     
     Args:
-        client: OpenAI/Azure client object
+        client: LLM client object (OpenAI, Azure, Anthropic, etc.)
         execution_settings: Semantic Kernel execution settings
-        temperature: Explicit temperature value
+        temperature: Explicit temperature value (0.0-2.0)
         max_tokens: Explicit max tokens value
-        top_p: Explicit top_p value
+        top_p: Explicit top_p value (0.0-1.0)
+        **kwargs: Additional parameters from other frameworks
         
     Returns:
-        Dict with temperature, max_tokens, top_p
+        Dict with temperature, max_tokens, top_p (None if not found)
+        
+    Example:
+        # From Semantic Kernel
+        params = extract_model_parameters(
+            execution_settings=sk_settings
+        )
+        
+        # From OpenAI client
+        params = extract_model_parameters(
+            client=openai_client,
+            temperature=0.7  # Override client default
+        )
+        
+        # Direct values
+        params = extract_model_parameters(
+            temperature=0.7,
+            max_tokens=1000
+        )
     """
     params = {
         'temperature': temperature,
@@ -792,9 +1066,19 @@ def extract_model_parameters(
         'top_p': top_p,
     }
     
-    # Try to extract from execution_settings (Semantic Kernel)
-    if execution_settings:
+    # PRIORITY 1: Check kwargs for framework-specific parameters
+    # LangChain, LlamaIndex, and other frameworks may pass model config in kwargs
+    if 'model_kwargs' in kwargs:
+        model_kwargs = kwargs['model_kwargs']
+        if isinstance(model_kwargs, dict):
+            params['temperature'] = params['temperature'] or model_kwargs.get('temperature')
+            params['max_tokens'] = params['max_tokens'] or model_kwargs.get('max_tokens')
+            params['top_p'] = params['top_p'] or model_kwargs.get('top_p')
+    
+    # PRIORITY 2: Extract from execution_settings (Semantic Kernel)
+    if execution_settings and not all(params.values()):
         try:
+            # Semantic Kernel style
             if hasattr(execution_settings, 'temperature'):
                 params['temperature'] = params['temperature'] or execution_settings.temperature
             if hasattr(execution_settings, 'max_tokens'):
@@ -802,24 +1086,32 @@ def extract_model_parameters(
             if hasattr(execution_settings, 'top_p'):
                 params['top_p'] = params['top_p'] or execution_settings.top_p
         except Exception:
-            pass  # Silent fail
+            pass  # Silent fail - not critical
     
-    # Try to extract from client (OpenAI/Azure)
+    # PRIORITY 3: Extract from client (OpenAI/Azure/Anthropic)
     if client and not all(params.values()):
         try:
+            # OpenAI/Azure OpenAI style (stored in client)
             if hasattr(client, 'temperature'):
                 params['temperature'] = params['temperature'] or client.temperature
             if hasattr(client, 'max_tokens'):
                 params['max_tokens'] = params['max_tokens'] or client.max_tokens
             if hasattr(client, 'top_p'):
                 params['top_p'] = params['top_p'] or client.top_p
+            
+            # Anthropic style (may be in client.default_request_params)
+            if hasattr(client, 'default_request_params'):
+                defaults = client.default_request_params
+                params['temperature'] = params['temperature'] or defaults.get('temperature')
+                params['max_tokens'] = params['max_tokens'] or defaults.get('max_tokens')
+                params['top_p'] = params['top_p'] or defaults.get('top_p')
         except Exception:
-            pass  # Silent fail
+            pass  # Silent fail - not critical
     
     return params
 
 # =============================================================================
-# WRAPPER: track_llm_call (COMPLETE 139 FIELD SUPPORT)
+# MAIN WRAPPER: track_llm_call()
 # =============================================================================
 
 def track_llm_call(
@@ -857,19 +1149,19 @@ def track_llm_call(
     prompt_variant_id: str = None,
     test_dataset_id: str = None,
     
-    # NEW: CONVERSATION LINKING
+    # Conversation linking
     conversation_id: str = None,
     turn_number: int = None,
     parent_call_id: str = None,
     user_id: str = None,
     
-    # NEW: MODEL CONFIGURATION
+    # Model configuration
     temperature: float = None,
     max_tokens: int = None,
     top_p: float = None,
     model_config: ModelConfig = None,
     
-    # NEW: TOKEN BREAKDOWN (Top-level for fast queries)
+    # Token breakdown (top-level)
     system_prompt_tokens: int = None,
     user_message_tokens: int = None,
     chat_history_tokens: int = None,
@@ -877,156 +1169,108 @@ def track_llm_call(
     conversation_context_tokens: int = None,
     tool_definitions_tokens: int = None,
     
-    # NEW: TOOL/FUNCTION CALLING
+    # Tool/function calling
     tool_calls_made: List[Dict[str, Any]] = None,
     tool_call_count: int = None,
     tool_execution_time_ms: float = None,
     
-    # NEW: STREAMING
+    # Streaming
     time_to_first_token_ms: float = None,
     streaming_metrics: StreamingMetrics = None,
     
-    # NEW: ERROR DETAILS
+    # Error details
     error_type: str = None,
     error_code: str = None,
-    error_category: str = None,  # Added for classify_error() support
     retry_count: int = None,
     error_details: ErrorDetails = None,
     
-    # NEW: CACHED TOKENS
+    # Cached tokens
     cached_prompt_tokens: int = None,
     cached_token_savings: float = None,
     
-    # NEW: OBSERVABILITY
+    # Observability
     trace_id: str = None,
     request_id: str = None,
     environment: str = None,
-
-    # NEW: PREFIX CACHE DETECTION
     prompt_prefix_hash: str = None,
     
-    # NEW: EXPERIMENT TRACKING
+    # Experiment tracking
     experiment_id: str = None,
     control_group: bool = None,
     experiment_metadata: ExperimentMetadata = None,
     
-    # CUSTOM METADATA
+    # Custom metadata
     metadata: dict = None,
-):
+) -> LLMCall:
     """
-    Track an LLM call with auto-filled defaults for Career Copilot.
+    Track an LLM call with auto-filled defaults for universal use.
     
-    Supports all 139 fields across 3 tiers plus new conversation linking,
-    model config, tool tracking, streaming, error details, experiments, and observability.
+    This is your main interface for tracking LLM calls. It automatically:
+    - Extracts token breakdown from messages
+    - Extracts model parameters from various sources
+    - Populates prompt_breakdown for analysis
+    - Cleans metadata before storage
+    
+    Supports all 139 fields across 3 tiers for comprehensive tracking.
     
     Args:
-        # TIER 1 - Core (always include)
-        model_name: Model used (defaults to DEFAULT_MODEL)
+        model_name: Model used (defaults to DEFAULT_MODEL if not provided)
         prompt_tokens: Input token count
         completion_tokens: Output token count
-        latency_ms: Response time in ms
-        agent_name: Name of agent/plugin
-        agent_role: Role (analyst, reviewer, writer, retriever, planner, formatter, fixer, orchestrator, custom)
-        operation: Operation name
-        success: Whether call succeeded
-        error: Error message if failed
+        latency_ms: Response time in milliseconds
         
-        # PROMPT CONTENT (Tier 2)
-        prompt: Combined prompt text
-        response_text: Response from model
-        prompt_normalized: Normalized prompt for cache key generation
-        system_prompt: System prompt (tracked separately)
-        user_message: User message (tracked separately)
-        messages: Full conversation as [{role, content}, ...]
+        [... all other 139 parameters ...]
         
-        # OPTIMIZATION TRACKING (Tier 2-3)
-        routing_decision: Routing metadata
-        cache_metadata: Cache metadata
-        quality_evaluation: Quality evaluation
-        prompt_breakdown: Prompt component breakdown
-        prompt_metadata: Prompt template metadata
-        prompt_variant_id: A/B test variant ID
-        test_dataset_id: Test dataset ID
-        
-        # NEW: CONVERSATION LINKING
-        conversation_id: Conversation identifier (links multi-turn chats)
-        turn_number: Turn number in conversation (1, 2, 3...)
-        parent_call_id: Parent call ID (for retries/branches)
-        user_id: User identifier
-        
-        # NEW: MODEL CONFIGURATION
-        temperature: Model temperature setting
-        max_tokens: Max tokens limit
-        top_p: Top-p sampling parameter
-        llm_config: Full ModelConfig object with all settings
-        
-        # NEW: TOKEN BREAKDOWN (Top-level for fast queries)
-        system_prompt_tokens: System prompt token count
-        user_message_tokens: User message token count
-        chat_history_tokens: Chat history token count
-        chat_history_count: Number of messages in chat history
-        conversation_context_tokens: Conversation memory/state tokens
-        tool_definitions_tokens: Function calling schema tokens
-        
-        # NEW: TOOL/FUNCTION CALLING
-        tool_calls_made: List of tool calls with details
-        tool_call_count: Number of tools called
-        tool_execution_time_ms: Total tool execution time
-        
-        # NEW: STREAMING
-        time_to_first_token_ms: Time to first token (TTFT)
-        streaming_metrics: Full StreamingMetrics object
-        
-        # NEW: ERROR DETAILS
-        error_type: Error classification (RATE_LIMIT, TIMEOUT, etc.)
-        error_code: Provider error code (429, 500, etc.)
-        error_category: Error category from classify_error()
-        retry_count: Number of retries attempted
-        error_details: Full ErrorDetails object
-        
-        # NEW: CACHED TOKENS
-        cached_prompt_tokens: Tokens served from cache
-        cached_token_savings: Cost saved via caching
-        
-        # NEW: OBSERVABILITY
-        trace_id: OpenTelemetry trace ID
-        request_id: Provider request ID
-        environment: Deployment environment (dev/staging/prod)
-        
-        # NEW: EXPERIMENT TRACKING
-        experiment_id: A/B test experiment ID
-        control_group: Is this control group?
-        experiment_metadata: Full ExperimentMetadata object
-        
-        # CUSTOM METADATA
-        metadata: Additional metadata dict
-    
     Returns:
-        LLMCall object
+        LLMCall object from Observatory
+        
+    Example:
+        # Minimal usage
+        track_llm_call(
+            model_name="gpt-4o-mini",
+            prompt_tokens=100,
+            completion_tokens=50,
+            latency_ms=500,
+            operation="generate_sql"
+        )
+        
+        # With auto-extraction
+        track_llm_call(
+            messages=[
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "Hello"}
+            ],
+            completion_tokens=50,
+            latency_ms=500,
+            operation="chat"
+        )
+        # Auto-extracts: system_prompt_tokens, user_message_tokens, etc.
     """
-    # ⭐ AUTO-EXTRACT: Token breakdown and model parameters
-    # This ensures ALL calls get Tier 2 fields populated automatically
     
-    # Extract token breakdown if not explicitly provided
+    # ═══════════════════════════════════════════════════════════════
+    # AUTO-EXTRACT: Token breakdown
+    # ═══════════════════════════════════════════════════════════════
     if not system_prompt_tokens and not user_message_tokens and not chat_history_tokens:
         token_breakdown = extract_token_breakdown_from_messages(
             messages=messages,
             system_prompt=system_prompt,
             user_message=user_message,
-            chat_history=None,  # We can add support for chat_history param if needed
-            conversation_memory=metadata.get('conversation_memory') if metadata else None
+            chat_history=metadata.get('chat_history') if metadata else None,
+            conversation_memory=metadata.get('conversation_memory') if metadata else None,
         )
         
-        # ✅ CHANGE 3: Extract chat_history_count from token_breakdown
         system_prompt_tokens = system_prompt_tokens or token_breakdown['system_prompt_tokens']
         user_message_tokens = user_message_tokens or token_breakdown['user_message_tokens']
         chat_history_tokens = chat_history_tokens or token_breakdown['chat_history_tokens']
-        chat_history_count = chat_history_count or token_breakdown.get('chat_history_count', 0)
+        chat_history_count = chat_history_count or token_breakdown['chat_history_count']
         conversation_context_tokens = conversation_context_tokens or token_breakdown['conversation_context_tokens']
     
-    # Extract model parameters if not explicitly provided
+    # ═══════════════════════════════════════════════════════════════
+    # AUTO-EXTRACT: Model parameters
+    # ═══════════════════════════════════════════════════════════════
     if temperature is None or max_tokens is None or top_p is None:
         model_params = extract_model_parameters(
+            client=metadata.get('client') if metadata else None,
             execution_settings=metadata.get('execution_settings') if metadata else None,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -1037,8 +1281,9 @@ def track_llm_call(
         max_tokens = max_tokens if max_tokens is not None else model_params['max_tokens']
         top_p = top_p if top_p is not None else model_params['top_p']
     
-    # ⭐ NEW: Auto-create prompt_breakdown if system_prompt or user_message provided
-    # This ensures these fields get extracted to columns for Stories 2 & 6
+    # ═══════════════════════════════════════════════════════════════
+    # AUTO-CREATE: prompt_breakdown for analysis
+    # ═══════════════════════════════════════════════════════════════
     if (system_prompt or user_message) and not prompt_breakdown:
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
@@ -1046,175 +1291,269 @@ def track_llm_call(
             system_prompt_tokens=system_prompt_tokens,
             user_message_tokens=user_message_tokens,
             chat_history_tokens=chat_history_tokens,
+            chat_history_count=chat_history_count,
+            conversation_context_tokens=conversation_context_tokens,
+            tool_definitions_tokens=tool_definitions_tokens,
             response_text=response_text,
         )
     
-    # Convert string agent_role to AgentRole enum if provided
+    # ═══════════════════════════════════════════════════════════════
+    # CONVERT: agent_role string to enum
+    # ═══════════════════════════════════════════════════════════════
     role_enum = None
     if agent_role:
         try:
             role_enum = AgentRole(agent_role)
         except ValueError:
-            # If not a valid enum value, store in metadata instead
+            # Not a valid enum - store in metadata instead
             if metadata is None:
                 metadata = {}
             metadata['agent_role_str'] = agent_role
     
-    # ⭐ CLEAN METADATA: Remove non-serializable objects before saving
+    # ═══════════════════════════════════════════════════════════════
+    # CLEAN: Remove non-serializable objects from metadata
+    # ═══════════════════════════════════════════════════════════════
     if metadata:
         metadata.pop('conversation_memory', None)
         metadata.pop('execution_settings', None)
+        metadata.pop('client', None)
+        metadata.pop('chat_history', None)
     
+    # ═══════════════════════════════════════════════════════════════
+    # CALL: SDK track_llm_call with all parameters
+    # ═══════════════════════════════════════════════════════════════
     return _sdk_track_llm_call(
+        # CORE: Observatory instance
         observatory=obs,
+        
+        # TIER 1: Core LLM metrics (always required)
         model_name=model_name or DEFAULT_MODEL,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        latency_ms=max(latency_ms, 0.001),
+        latency_ms=max(latency_ms, 0.001),  # Ensure non-zero
         provider=DEFAULT_PROVIDER,
+        
+        # TIER 1: Context & identification
         agent_name=agent_name,
         agent_role=role_enum,
         operation=operation,
+        
+        # TIER 1: Status
         success=success,
         error=error,
+        
+        # TIER 2: Prompt content
         prompt=prompt,
         response_text=response_text,
         prompt_normalized=prompt_normalized,
         system_prompt=system_prompt,
         user_message=user_message,
         messages=messages,
+        
+        # TIER 2: Optimization tracking (SDK components)
         routing_decision=routing_decision,
         cache_metadata=cache_metadata,
         quality_evaluation=quality_evaluation,
         prompt_breakdown=prompt_breakdown,
         prompt_metadata=prompt_metadata,
+        
+        # TIER 3: A/B Testing
         prompt_variant_id=prompt_variant_id,
         test_dataset_id=test_dataset_id,
         
-        # NEW: Conversation linking
+        # Conversation linking
         conversation_id=conversation_id,
         turn_number=turn_number,
         parent_call_id=parent_call_id,
         user_id=user_id,
         
-        # NEW: Model configuration
+        # Model configuration
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
         model_config=model_config,
         
-        # NEW: Token breakdown
+        # Token breakdown (auto-extracted)
         system_prompt_tokens=system_prompt_tokens,
         user_message_tokens=user_message_tokens,
         chat_history_tokens=chat_history_tokens,
-        chat_history_count=chat_history_count,  # ✅ CHANGE 4: Pass chat_history_count to SDK
+        chat_history_count=chat_history_count,
         conversation_context_tokens=conversation_context_tokens,
         tool_definitions_tokens=tool_definitions_tokens,
         
-        # NEW: Tool tracking
+        # Tool/function calling
         tool_calls_made=tool_calls_made,
         tool_call_count=tool_call_count,
         tool_execution_time_ms=tool_execution_time_ms,
         
-        # NEW: Streaming
+        # Streaming metrics
         time_to_first_token_ms=time_to_first_token_ms,
         streaming_metrics=streaming_metrics,
         
-        # NEW: Error details
+        # Error tracking
         error_type=error_type,
         error_code=error_code,
         retry_count=retry_count,
         error_details=error_details,
         
-        # NEW: Cached tokens
+        # Caching & token optimization
         cached_prompt_tokens=cached_prompt_tokens,
         cached_token_savings=cached_token_savings,
         
-        # NEW: Observability
+        # Observability & tracing
         trace_id=trace_id,
         request_id=request_id,
         environment=environment,
-        
-        # NEW: Prefix cache detection
         prompt_prefix_hash=prompt_prefix_hash,
         
-        # NEW: Experiment tracking
+        # Experiment tracking
         experiment_id=experiment_id,
         control_group=control_group,
         experiment_metadata=experiment_metadata,
         
+        # Custom metadata
         metadata=metadata,
     )
-
-
 
 # =============================================================================
 # SESSION HELPERS
 # =============================================================================
 
-def start_session(operation_type: str = None, **metadata):
-    """Start a tracking session."""
-    return obs.start_session(operation_type, **metadata)
+def start_session(
+    operation_type: str = None,
+    **metadata
+) -> Any:
+    """
+    Start a new Observatory session for tracking related LLM calls.
+    
+    Sessions group multiple LLM calls together (e.g., a multi-turn conversation,
+    a complex workflow with multiple agent interactions).
+    
+    Universal wrapper - works for any project type.
+    
+    Args:
+        operation_type: Type of operation (e.g., "chat", "workflow", "analysis")
+        **metadata: Additional session metadata (user_id, conversation_id, etc.)
+        
+    Returns:
+        Session object from Observatory
+        
+    Example:
+        # Start a session
+        session = start_session(
+            operation_type="job_search_workflow",
+            user_id="user_123",
+            conversation_id="conv_456"
+        )
+        
+        # Track calls within session
+        track_llm_call(..., metadata={"session_id": session.id})
+        
+        # End session
+        end_session(session, success=True)
+    """
+    return obs.start_session(operation_type=operation_type, **metadata)
 
 
-def end_session(session, success: bool = True, error: str = None):
-    """End a tracking session."""
-    return obs.end_session(session, success=success, error=error)
+def end_session(
+    session: Any,
+    success: bool = True,
+    error: str = None,
+    **metadata
+) -> None:
+    """
+    End an Observatory session.
+    
+    Marks the session as complete and records success/failure status.
+    
+    Universal wrapper - works for any project type.
+    
+    Args:
+        session: Session object from start_session()
+        success: Whether the session completed successfully
+        error: Error message if session failed
+        **metadata: Additional metadata to store with session
+        
+    Example:
+        session = start_session("chat")
+        
+        try:
+            # Your application logic
+            track_llm_call(...)
+            end_session(session, success=True)
+        except Exception as e:
+            end_session(session, success=False, error=str(e))
+    """
+    return obs.end_session(session, success=success, error=error, **metadata)
 
+# =============================================================================
+# EXPORTS
+# =============================================================================
 
 # =============================================================================
 # EXPORTS
 # =============================================================================
 
 __all__ = [
-    # Configured instances
-    'obs',
-    'judge',
-    'cache',
-    'router',
-    'prompts',
-    'semantic_cache',
+    # Observatory instance & components
+    'obs',              # Main Observatory instance
+    'judge',            # LLM Judge for quality evaluation
+    'cache',            # Exact match cache (CacheManager)
+    'prefix_cache',     # Prefix cache detector (Azure/Anthropic)
+    'semantic_cache',   # Semantic similarity cache (SemanticCache)
+    'router',           # Model router for intelligent selection
+    'prompts',          # Prompt manager for A/B testing
+    'prompt_optimizer', # Prompt compression and token efficiency
     
-    # Config values
+    # Execution optimization detectors
+    'batch_detector',     
+    'parallel_detector',  
+    'streaming_detector', 
+    
+    # Main interface
+    'track_llm_call',   # Main wrapper with auto-extraction
+    
+    # Helper functions
+    'classify_error',
+    'extract_token_breakdown_from_messages',
+    'extract_model_parameters',
+    
+    # Session management
+    'start_session',
+    'end_session',
+    
+    # Configuration constants
     'PROJECT_NAME',
     'DEFAULT_MODEL',
     'DEFAULT_PROVIDER',
     'CURRENT_PHASE',
+    'OBSERVATORY_DB_PATH',
+    'PROMPT_VARIANTS',        
+    'OPERATION_COMPLEXITY',   
     
-    # Functions (SDK-matching names)
-    'track_llm_call',
-    'start_session',
-    'end_session',
-    
-    # Helper functions for error classification and cache keys
-    'classify_error',
-    'generate_cache_key',
-    'calculate_complexity_score',
-    'calculate_prefix_hash',
-    
-    # Re-exported for convenience
-    'create_routing_decision',
-    'create_cache_metadata',
-    'create_quality_evaluation',
-    'create_prompt_metadata',
-    'create_prompt_breakdown',
-    'estimate_tokens',
-    
-    # Types for type hints (existing)
+    # Data models (re-exported from SDK for convenience)
+    'LLMCall',
     'RoutingDecision',
     'CacheMetadata',
     'QualityEvaluation',
     'PromptBreakdown',
     'PromptMetadata',
-    'AgentRole',
-    
-    # Additional types
     'ModelConfig',
     'StreamingMetrics',
     'ExperimentMetadata',
     'ErrorDetails',
-
-    # Semantic cache helpers
     'SemanticCacheResult',
+    
+    # Helper functions (re-exported from SDK for convenience)
+    'create_routing_decision',
+    'create_cache_metadata',
+    'create_quality_evaluation',
+    'create_prompt_metadata',
+    'create_prompt_breakdown',
     'create_semantic_cache_metadata',
+    'estimate_tokens',
+    
+    # Enums (re-exported from SDK for convenience)
+    'ModelProvider',
+    'AgentRole',
 ]
