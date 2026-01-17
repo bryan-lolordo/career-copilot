@@ -22,7 +22,10 @@ import uuid
 from agents.semantic_kernel_setup import (
     create_kernel_with_plugins,
     create_execution_settings,
-    create_chat_history_with_system_prompt,
+    create_chat_history_with_system_prompt_cached,
+    extract_cache_metrics,
+    calculate_cache_savings,
+    compute_prompt_prefix_hash,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_VERSION,
     extract_messages_from_history,
@@ -44,7 +47,12 @@ from observatory_config import (
     prompt_optimizer,
     batch_detector,
     streaming_detector,
+    sequential_detector,        
+    context_growth_detector,    
+    token_efficiency_detector,  
     judge,
+    batch_processor,       
+    parallel_executor,
     
     # Session management
     start_session,
@@ -64,6 +72,7 @@ from observatory_config import (
     create_cache_metadata,
     estimate_tokens,
     classify_error,
+    fire_and_forget_judge,  # Non-blocking judge evaluation
 )
 
 # Configure logging
@@ -82,7 +91,7 @@ memory = memory_manager.get_session("streamlit_default")
 
 kernel, chat_completion, db_service, memory = create_kernel_with_plugins(memory)
 execution_settings = create_execution_settings()
-history = create_chat_history_with_system_prompt()
+history = create_chat_history_with_system_prompt_cached(kernel=kernel)  # ← Changed
 
 context = memory.context
 
@@ -180,7 +189,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         # STEP 2: Check semantic cache (if available)
         # ═══════════════════════════════════════════════════════════════
         if semantic_cache:
-            result = semantic_cache.get(operation=operation, prompt=message)
+            result = await semantic_cache.get(operation=operation, prompt=message)
             if result.hit:  # False in baseline, True in optimized if similar match
                 # Track semantic cache hit
                 track_llm_call(
@@ -219,19 +228,21 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         # ═══════════════════════════════════════════════════════════════
         # STEP 3: Get optimized prompt and max_tokens
         # ═══════════════════════════════════════════════════════════════
-        optimized_prompt, max_tokens_limit, prompt_meta = prompt_optimizer.get_optimized_prompt(
+        _, max_tokens_limit, prompt_meta = prompt_optimizer.get_optimized_prompt(
             operation=operation,
             default_prompt=SYSTEM_PROMPT
         )
-        # Returns: default in baseline, compressed in optimized
+        # Override: Use original prompt to preserve cache (ignore optimizer's prompt)
+        optimized_prompt = SYSTEM_PROMPT
         
         # ═══════════════════════════════════════════════════════════════
         # STEP 4: Get routed model
         # ═══════════════════════════════════════════════════════════════
-        routed_model, routing_meta = router.route(
-            operation=operation,
-            prompt_tokens=estimate_tokens(optimized_prompt),
-            complexity=0.5  # Medium complexity for chat
+        routed_model, routing_meta = router.select(
+                operation=operation,
+                prompt=optimized_prompt,  # ← Use 'prompt' not 'prompt_tokens'
+                estimated_tokens=estimate_tokens(optimized_prompt),  # ← Use 'estimated_tokens'
+                complexity=0.5
         )
         # Returns: default model in baseline, routed model in optimized
         
@@ -252,12 +263,28 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         execution_settings.max_tokens = max_tokens_limit
         
         # Update system prompt in history if it was optimized
-        if optimized_prompt != SYSTEM_PROMPT and len(history.messages) > 0:
-            if history.messages[0].role.value.lower() in ['system', 'developer']:
-                history.messages[0].content = optimized_prompt
+        # if optimized_prompt != SYSTEM_PROMPT and len(history.messages) > 0:
+        #     if history.messages[0].role.value.lower() in ['system', 'developer']:
+        #         history.messages[0].content = optimized_prompt
         
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 5.5: Trim chat history to prevent context bloat
+        # ═══════════════════════════════════════════════════════════════
+        messages_removed = 0
+        tokens_saved = 0
+        if memory.turn_number > 1:  # Skip first turn (no history yet)
+            history, messages_removed, tokens_saved = memory.trim_history(
+                chat_history=history,
+                max_turns=10,       # Keep last 10 turns
+                max_tokens=5000,   # Max 5,000 tokens of history
+                preserve_system=True
+            )
+            
         llm_start_time = time.time()
-        
+
+        # Initialize cache_metrics with defaults (will be populated on success)
+        cache_metrics = {"cached_tokens": 0, "cache_hit": False, "uncached_tokens": 0}
+
         try:
             # Make the actual LLM call
             response = await chat_completion.get_chat_message_content(
@@ -265,13 +292,22 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
                 settings=execution_settings,
                 kernel=kernel,
             )
-            
+
             latency_ms = (time.time() - llm_start_time) * 1000
             response_text = str(response)
             success = True
             error = None
             error_type = None
             error_code = None
+
+            # Extract cache metrics from Azure response
+            cache_metrics = extract_cache_metrics(response)
+            if cache_metrics["cache_hit"]:
+                savings = calculate_cache_savings(cache_metrics)
+                logger.info(
+                    f"✅ Cache hit: {cache_metrics['cached_tokens']:,} tokens - "
+                    f"saved ${savings['cost_saved']:.4f}"
+                )
             
         except Exception as e:
             latency_ms = (time.time() - llm_start_time) * 1000
@@ -329,6 +365,33 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             latency_ms=latency_ms,
             completion_tokens=completion_tokens,
         )
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 8.5: Detect context growth and token inefficiency (NEW)
+        # ═══════════════════════════════════════════════════════════════
+        context_growth_alert = None
+        token_efficiency_alert = None
+        
+        if success and prompt_breakdown:
+            # Check for context growth (chat history bloat)
+            if prompt_breakdown.chat_history_tokens and prompt_tokens > 0:
+                context_growth_alert = context_growth_detector.check_call(
+                    operation=operation,
+                    chat_history_tokens=prompt_breakdown.chat_history_tokens,
+                    total_prompt_tokens=prompt_tokens,
+                    call_id=memory.request_id,
+                    agent_name="ChatAgent",
+                )
+            
+            # Check for token inefficiency (high prompt/completion ratio)
+            if completion_tokens > 0:
+                token_efficiency_alert = token_efficiency_detector.check_call(
+                    operation=operation,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    call_id=memory.request_id,
+                    agent_name="ChatAgent",
+                )
         
         # ═══════════════════════════════════════════════════════════════
         # STEP 9: Cache the response (if successful)
@@ -341,7 +404,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             )
             
             if semantic_cache:
-                semantic_cache.set(
+                await semantic_cache.set(
                     operation=operation,
                     prompt=message,
                     response=response_text
@@ -357,15 +420,16 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
         # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown_from_messages(messages_for_breakdown)
         
-        # LLM Judge evaluation (if enabled and successful)
+        # LLM Judge evaluation (fire-and-forget - doesn't block response)
         quality_eval = None
         if success:
-            quality_eval = await judge.maybe_evaluate(
+            fire_and_forget_judge(
                 operation=operation,
                 prompt=message,
                 response=response_text,
                 llm_client=kernel,
             )
+            # quality_eval stays None - judge runs in background
         
         # Track in Observatory with all 139 fields
         track_llm_call(
@@ -391,7 +455,7 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             routing_decision=routing_meta,  # From Step 4
             cache_metadata=cache_meta,  # From Step 1
             quality_evaluation=quality_eval,
-            prompt_metadata=prompt_meta,  # From Step 3
+            prompt_metadata=None,  # From Step 3
             
             # TIER 3: A/B Testing support
             prompt_variant_id=None,
@@ -423,7 +487,12 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             # Error details (if failed)
             error_type=error_type,
             error_code=error_code,
-            
+
+            # Azure prompt cache metrics (stable_prefix category)
+            cached_prompt_tokens=cache_metrics.get("cached_tokens", 0),
+            cached_token_savings=calculate_cache_savings(cache_metrics)["cost_saved"] if cache_metrics.get("cache_hit") else 0.0,
+            prompt_prefix_hash=compute_prompt_prefix_hash(optimized_prompt),
+
             # Observability
             trace_id=memory.conversation_id,
             request_id=memory.request_id,
@@ -438,7 +507,17 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
                 "conversation_turn": len(history.messages),
                 "system_prompt_version": SYSTEM_PROMPT_VERSION,
                 "judged": quality_eval is not None,
-                "streaming_candidate": streaming_candidate,
+                "streaming_candidate": streaming_candidate is not None,
+                "context_growth_alert": context_growth_alert is not None,
+                "token_efficiency_alert": token_efficiency_alert is not None,
+                # Cache metrics
+                "cache_hit": cache_metrics.get("cache_hit", False),
+                "cached_tokens": cache_metrics.get("cached_tokens", 0),
+                "uncached_tokens": cache_metrics.get("uncached_tokens", 0),
+                # History trimming metrics (NEW)
+                "history_trimmed": messages_removed > 0 if 'messages_removed' in locals() else False,
+                "messages_removed": messages_removed if 'messages_removed' in locals() else 0,
+                "tokens_saved_by_trimming": tokens_saved if 'tokens_saved' in locals() else 0,
             }
         )
         
@@ -449,6 +528,14 @@ async def chat_with_kernel(message: str) -> tuple[str, str]:
             operation=operation,
             call_id=memory.request_id,
             latency_ms=latency_ms,
+            agent_name="ChatAgent",
+        )
+        
+        sequential_detector.track_call(
+            operation=operation,
+            call_id=memory.request_id,
+            latency_ms=latency_ms,
+            agent_name="ChatAgent",
         )
         
         # Log results
@@ -618,10 +705,10 @@ def create_prompt_breakdown_from_messages(messages: list) -> dict:
 # ============================================================================
 def reset_chat_history():
     """Reset the conversation history and memory."""
-    global history, memory
+    global history, memory, kernel
     logger.info("Resetting chat history and memory")
     
-    history = create_chat_history_with_system_prompt()
+    history = create_chat_history_with_system_prompt_cached(kernel=kernel)
     memory.chat_history = history
     # Reset memory context
     memory.context.awaiting_confirmation = False

@@ -24,25 +24,30 @@ import uuid
 from observatory_config import (
     # Main tracking
     track_llm_call,
-    
+
     # Optimization components (10-step pattern - import ALL for consistency)
-    cache,                    # Step 1: Exact match caching
-    semantic_cache,          # Step 2: Semantic similarity caching
-    prefix_cache,            # Step 5: Prefix cache detection
-    router,                  # Step 4: Model routing
-    prompt_optimizer,        # Step 3: Prompt compression
-    streaming_detector,      # Step 7: Streaming detection
-    batch_detector,          # Step 11: Batch detection
-    parallel_detector,       # (Available for parallel execution)
-    judge,                   # Step 9: Quality evaluation
-    
+    cache,
+    # semantic_cache,  # Not used - iterative refinement needs unique responses
+    prefix_cache,
+    router,
+    prompt_optimizer,
+    batch_detector,
+    parallel_detector,
+    streaming_detector,
+    sequential_detector,
+    context_growth_detector,
+    token_efficiency_detector,
+    judge,
+    batch_processor,
+    parallel_executor,
+
     # Config constants
     DEFAULT_MODEL,
     CURRENT_PHASE,
-    
+
     # Data models
     PromptMetadata,
-    
+
     # Helper functions
     create_prompt_metadata,
     create_prompt_breakdown,
@@ -50,6 +55,8 @@ from observatory_config import (
     create_cache_metadata,
     estimate_tokens,
     classify_error,
+    extract_azure_cache_metrics,
+    fire_and_forget_judge,  # Non-blocking judge evaluation
 )
 
 # Configure logging
@@ -77,16 +84,18 @@ class SelfImprovingMatchPlugin:
     future flexibility.
     """
     
-    def __init__(self, kernel, matching_plugin, context=None, memory=None):
+    def __init__(self, kernel, matching_plugin, chat_completion=None, context=None, memory=None):
         """
         Args:
             kernel: Semantic Kernel instance
             matching_plugin: The ResumeMatchingPlugin instance
+            chat_completion: Azure chat completion service for direct LLM calls with caching
             context: Shared ConversationContext instance
             memory: ConversationMemory instance for tracking
         """
         self.kernel = kernel
         self.matching_plugin = matching_plugin
+        self.chat_completion = chat_completion
         self.context = context
         self.memory = memory
 
@@ -387,14 +396,58 @@ Format:
         full_prompt = f"{system_prompt}\n\n{user_message}"
         request_id = str(uuid.uuid4())
 
+        # Use ChatHistory for Azure prompt caching support
+        from semantic_kernel.contents import ChatHistory
+        from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+            AzureChatPromptExecutionSettings,
+        )
+
+        deep_analyze_history = ChatHistory()
+        deep_analyze_history.add_system_message(system_prompt)
+        deep_analyze_history.add_user_message(user_message)
+
+        # Create isolated execution settings WITHOUT function calling
+        deep_analyze_settings = AzureChatPromptExecutionSettings()
+        deep_analyze_settings.max_tokens = 2500
+        deep_analyze_settings.temperature = 0.7
+
         llm_start_time = time.time()
-        result = await self.kernel.invoke_prompt(full_prompt)
+        if self.chat_completion:
+            result = await self.chat_completion.get_chat_message_content(
+                chat_history=deep_analyze_history,
+                settings=deep_analyze_settings,
+            )
+        else:
+            result = await self.kernel.invoke_prompt(full_prompt)
         latency_ms = (time.time() - llm_start_time) * 1000
         result_str = str(result).strip()
-        
-        prompt_tokens = estimate_tokens(full_prompt)
-        completion_tokens = estimate_tokens(result_str)
-        
+
+        # Extract Azure cache metrics
+        azure_cache_metrics = {}
+        if self.chat_completion and hasattr(result, 'metadata'):
+            azure_cache_metrics = extract_azure_cache_metrics(result, system_prompt)
+            if azure_cache_metrics.get("cached_prompt_tokens", 0) > 0:
+                logger.info(f"[SELF_IMPROVE] ✅ Azure cache hit! {azure_cache_metrics['cached_prompt_tokens']:,} tokens cached")
+
+        # Extract token usage from metadata
+        prompt_tokens = 0
+        completion_tokens = 0
+        if hasattr(result, 'metadata') and result.metadata:
+            usage = result.metadata.get('usage')
+            if usage:
+                if hasattr(usage, 'prompt_tokens'):
+                    prompt_tokens = usage.prompt_tokens or 0
+                    completion_tokens = usage.completion_tokens or 0
+                elif isinstance(usage, dict):
+                    prompt_tokens = usage.get('prompt_tokens', 0)
+                    completion_tokens = usage.get('completion_tokens', 0)
+
+        # Fallback to estimation if not available
+        if not prompt_tokens:
+            prompt_tokens = estimate_tokens(full_prompt)
+        if not completion_tokens:
+            completion_tokens = estimate_tokens(result_str)
+
         # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
@@ -402,15 +455,16 @@ Format:
             user_message=user_message,
             user_message_tokens=estimate_tokens(user_message),
         )
-        
-        # LLM Judge evaluation
-        quality_eval = await judge.maybe_evaluate(
+
+        # LLM Judge evaluation (fire-and-forget - doesn't block response)
+        fire_and_forget_judge(
             operation="deep_analyze_with_guidance",
             prompt=full_prompt[:5000],
             response=result_str[:5000],
             llm_client=self.kernel,
         )
-        
+        quality_eval = None  # Judge runs in background
+
         # Track with phase metadata
         track_llm_call(
             prompt_tokens=prompt_tokens,
@@ -432,6 +486,8 @@ Format:
             request_id=request_id,
             trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
+            # Azure prompt cache metrics
+            **azure_cache_metrics,
             metadata={
                 "phase": CURRENT_PHASE,  # ← CRITICAL
                 "job_id": job.get('id'),
@@ -443,6 +499,16 @@ Format:
         )
 
         logger.info(f"📊 Tracked deep analysis: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+
+        # Track token efficiency
+        if completion_tokens > 0:
+            token_efficiency_detector.check_call(
+                operation="deep_analyze_with_guidance",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                call_id=request_id,
+                agent_name="SelfImprovingMatch",
+            )
         
         # Parse JSON
         if '```json' in result_str:
@@ -565,14 +631,58 @@ Company: {job.get('company', 'N/A')}
         full_prompt = f"{system_prompt}\n\n{user_message}"
         request_id = str(uuid.uuid4())
 
+        # Use ChatHistory for Azure prompt caching support
+        from semantic_kernel.contents import ChatHistory
+        from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+            AzureChatPromptExecutionSettings,
+        )
+
+        refine_history = ChatHistory()
+        refine_history.add_system_message(system_prompt)
+        refine_history.add_user_message(user_message)
+
+        # Create isolated execution settings WITHOUT function calling
+        refine_settings = AzureChatPromptExecutionSettings()
+        refine_settings.max_tokens = 2500
+        refine_settings.temperature = 0.5
+
         llm_start_time = time.time()
-        result = await self.kernel.invoke_prompt(full_prompt)
+        if self.chat_completion:
+            result = await self.chat_completion.get_chat_message_content(
+                chat_history=refine_history,
+                settings=refine_settings,
+            )
+        else:
+            result = await self.kernel.invoke_prompt(full_prompt)
         latency_ms = (time.time() - llm_start_time) * 1000
         result_str = str(result).strip()
-        
-        prompt_tokens = estimate_tokens(full_prompt)
-        completion_tokens = estimate_tokens(result_str)
-        
+
+        # Extract Azure cache metrics
+        azure_cache_metrics = {}
+        if self.chat_completion and hasattr(result, 'metadata'):
+            azure_cache_metrics = extract_azure_cache_metrics(result, system_prompt)
+            if azure_cache_metrics.get("cached_prompt_tokens", 0) > 0:
+                logger.info(f"[REFINE] ✅ Azure cache hit! {azure_cache_metrics['cached_prompt_tokens']:,} tokens cached")
+
+        # Extract token usage from metadata
+        prompt_tokens = 0
+        completion_tokens = 0
+        if hasattr(result, 'metadata') and result.metadata:
+            usage = result.metadata.get('usage')
+            if usage:
+                if hasattr(usage, 'prompt_tokens'):
+                    prompt_tokens = usage.prompt_tokens or 0
+                    completion_tokens = usage.completion_tokens or 0
+                elif isinstance(usage, dict):
+                    prompt_tokens = usage.get('prompt_tokens', 0)
+                    completion_tokens = usage.get('completion_tokens', 0)
+
+        # Fallback to estimation if not available
+        if not prompt_tokens:
+            prompt_tokens = estimate_tokens(full_prompt)
+        if not completion_tokens:
+            completion_tokens = estimate_tokens(result_str)
+
         # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
@@ -580,15 +690,16 @@ Company: {job.get('company', 'N/A')}
             user_message=user_message,
             user_message_tokens=estimate_tokens(user_message),
         )
-        
-        # LLM Judge evaluation
-        quality_eval = await judge.maybe_evaluate(
+
+        # LLM Judge evaluation (fire-and-forget - doesn't block response)
+        fire_and_forget_judge(
             operation="refine_analysis",
             prompt=full_prompt[:5000],
             response=result_str[:5000],
             llm_client=self.kernel,
         )
-        
+        quality_eval = None  # Judge runs in background
+
         # Track with phase metadata
         track_llm_call(
             prompt_tokens=prompt_tokens,
@@ -610,6 +721,8 @@ Company: {job.get('company', 'N/A')}
             request_id=request_id,
             trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
+            # Azure prompt cache metrics
+            **azure_cache_metrics,
             metadata={
                 "phase": CURRENT_PHASE,  # ← CRITICAL
                 "job_id": job.get('id'),
@@ -619,8 +732,18 @@ Company: {job.get('company', 'N/A')}
                 "judged": quality_eval is not None,
             }
         )
-        
+
         logger.info(f"📊 Tracked refinement: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+
+        # Track token efficiency for refinement
+        if completion_tokens > 0:
+            token_efficiency_detector.check_call(
+                operation="refine_analysis",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                call_id=request_id,
+                agent_name="SelfImprovingMatch",
+            )
         
         # Parse JSON
         if '```json' in result_str:
@@ -708,14 +831,58 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
         full_prompt = f"{system_prompt}\n\n{user_message}"
         request_id = str(uuid.uuid4())
 
+        # Use ChatHistory for Azure prompt caching support
+        from semantic_kernel.contents import ChatHistory
+        from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+            AzureChatPromptExecutionSettings,
+        )
+
+        critique_history = ChatHistory()
+        critique_history.add_system_message(system_prompt)
+        critique_history.add_user_message(user_message)
+
+        # Create isolated execution settings WITHOUT function calling
+        critique_settings = AzureChatPromptExecutionSettings()
+        critique_settings.max_tokens = 1000
+        critique_settings.temperature = 0.3
+
         llm_start_time = time.time()
-        result = await self.kernel.invoke_prompt(full_prompt)
+        if self.chat_completion:
+            result = await self.chat_completion.get_chat_message_content(
+                chat_history=critique_history,
+                settings=critique_settings,
+            )
+        else:
+            result = await self.kernel.invoke_prompt(full_prompt)
         latency_ms = (time.time() - llm_start_time) * 1000
         result_str = str(result).strip()
-        
-        prompt_tokens = estimate_tokens(full_prompt)
-        completion_tokens = estimate_tokens(result_str)
-        
+
+        # Extract Azure cache metrics
+        azure_cache_metrics = {}
+        if self.chat_completion and hasattr(result, 'metadata'):
+            azure_cache_metrics = extract_azure_cache_metrics(result, system_prompt)
+            if azure_cache_metrics.get("cached_prompt_tokens", 0) > 0:
+                logger.info(f"[CRITIQUE] ✅ Azure cache hit! {azure_cache_metrics['cached_prompt_tokens']:,} tokens cached")
+
+        # Extract token usage from metadata
+        prompt_tokens = 0
+        completion_tokens = 0
+        if hasattr(result, 'metadata') and result.metadata:
+            usage = result.metadata.get('usage')
+            if usage:
+                if hasattr(usage, 'prompt_tokens'):
+                    prompt_tokens = usage.prompt_tokens or 0
+                    completion_tokens = usage.completion_tokens or 0
+                elif isinstance(usage, dict):
+                    prompt_tokens = usage.get('prompt_tokens', 0)
+                    completion_tokens = usage.get('completion_tokens', 0)
+
+        # Fallback to estimation if not available
+        if not prompt_tokens:
+            prompt_tokens = estimate_tokens(full_prompt)
+        if not completion_tokens:
+            completion_tokens = estimate_tokens(result_str)
+
         # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
@@ -723,15 +890,16 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             user_message=user_message,
             user_message_tokens=estimate_tokens(user_message),
         )
-        
-        # LLM Judge evaluation
-        quality_eval = await judge.maybe_evaluate(
+
+        # LLM Judge evaluation (fire-and-forget - doesn't block response)
+        fire_and_forget_judge(
             operation="critique_match",
             prompt=full_prompt,
             response=result_str,
             llm_client=self.kernel,
         )
-        
+        quality_eval = None  # Judge runs in background
+
         # Track with phase metadata
         track_llm_call(
             prompt_tokens=prompt_tokens,
@@ -752,6 +920,8 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
             request_id=request_id,
             trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
+            # Azure prompt cache metrics
+            **azure_cache_metrics,
             metadata={
                 "phase": CURRENT_PHASE,  # ← CRITICAL
                 "job_id": job.get('id'),
@@ -763,6 +933,16 @@ CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
         )
         
         logger.info(f"📊 Tracked critique: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+
+        # Track token efficiency for critique
+        if completion_tokens > 0:
+            token_efficiency_detector.check_call(
+                operation="critique_match",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                call_id=request_id,
+                agent_name="SelfImprovingMatch",
+            )
         
         # Clean JSON
         if '```json' in result_str:
@@ -817,14 +997,58 @@ CRITICAL: Return ONLY valid JSON."""
         full_prompt = f"{system_prompt}\n\n{user_message}"
         request_id = str(uuid.uuid4())
 
+        # Use ChatHistory for Azure prompt caching support
+        from semantic_kernel.contents import ChatHistory
+        from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+            AzureChatPromptExecutionSettings,
+        )
+
+        refinements_history = ChatHistory()
+        refinements_history.add_system_message(system_prompt)
+        refinements_history.add_user_message(user_message)
+
+        # Create isolated execution settings WITHOUT function calling
+        refinements_settings = AzureChatPromptExecutionSettings()
+        refinements_settings.max_tokens = 800
+        refinements_settings.temperature = 0.3
+
         llm_start_time = time.time()
-        result = await self.kernel.invoke_prompt(full_prompt)
+        if self.chat_completion:
+            result = await self.chat_completion.get_chat_message_content(
+                chat_history=refinements_history,
+                settings=refinements_settings,
+            )
+        else:
+            result = await self.kernel.invoke_prompt(full_prompt)
         latency_ms = (time.time() - llm_start_time) * 1000
         result_str = str(result).strip()
-        
-        prompt_tokens = estimate_tokens(full_prompt)
-        completion_tokens = estimate_tokens(result_str)
-        
+
+        # Extract Azure cache metrics
+        azure_cache_metrics = {}
+        if self.chat_completion and hasattr(result, 'metadata'):
+            azure_cache_metrics = extract_azure_cache_metrics(result, system_prompt)
+            if azure_cache_metrics.get("cached_prompt_tokens", 0) > 0:
+                logger.info(f"[REFINEMENTS] ✅ Azure cache hit! {azure_cache_metrics['cached_prompt_tokens']:,} tokens cached")
+
+        # Extract token usage from metadata
+        prompt_tokens = 0
+        completion_tokens = 0
+        if hasattr(result, 'metadata') and result.metadata:
+            usage = result.metadata.get('usage')
+            if usage:
+                if hasattr(usage, 'prompt_tokens'):
+                    prompt_tokens = usage.prompt_tokens or 0
+                    completion_tokens = usage.completion_tokens or 0
+                elif isinstance(usage, dict):
+                    prompt_tokens = usage.get('prompt_tokens', 0)
+                    completion_tokens = usage.get('completion_tokens', 0)
+
+        # Fallback to estimation if not available
+        if not prompt_tokens:
+            prompt_tokens = estimate_tokens(full_prompt)
+        if not completion_tokens:
+            completion_tokens = estimate_tokens(result_str)
+
         # Create prompt breakdown
         prompt_breakdown = create_prompt_breakdown(
             system_prompt=system_prompt,
@@ -832,9 +1056,9 @@ CRITICAL: Return ONLY valid JSON."""
             user_message=user_message,
             user_message_tokens=estimate_tokens(user_message),
         )
-        
+
         # NO judge for this low-value operation
-        
+
         # Track with phase metadata (no quality evaluation for low-value op)
         track_llm_call(
             prompt_tokens=prompt_tokens,
@@ -855,6 +1079,8 @@ CRITICAL: Return ONLY valid JSON."""
             request_id=request_id,
             trace_id=self.memory.conversation_id if self.memory else None,
             environment=os.getenv("ENVIRONMENT", "development"),
+            # Azure prompt cache metrics
+            **azure_cache_metrics,
             metadata={
                 "phase": CURRENT_PHASE,  # ← CRITICAL
                 "job_id": job.get('id'),
@@ -865,6 +1091,16 @@ CRITICAL: Return ONLY valid JSON."""
         )
         
         logger.info(f"📊 Tracked refinement generation: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+
+        # Track token efficiency for refinement generation
+        if completion_tokens > 0:
+            token_efficiency_detector.check_call(
+                operation="generate_refinements",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                call_id=request_id,
+                agent_name="SelfImprovingMatch",
+            )
         
         # Clean JSON
         if '```json' in result_str:

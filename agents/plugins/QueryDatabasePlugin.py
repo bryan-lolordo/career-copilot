@@ -23,31 +23,38 @@ from services.db import DB_PATH
 from observatory_config import (
     # Main tracking
     track_llm_call,
-    
+
     # Optimization components (import ALL for consistency)
     cache,
     semantic_cache,
     prefix_cache,
     router,
     prompt_optimizer,
+    batch_detector,
+    parallel_detector,
     streaming_detector,
-    batch_detector,         
-    parallel_detector,      
+    sequential_detector,
+    context_growth_detector,
+    token_efficiency_detector,
     judge,
-    
+    batch_processor,
+    parallel_executor,
+    fire_and_forget_judge,  # Non-blocking judge evaluation
+
     # Config constants
     DEFAULT_MODEL,
     CURRENT_PHASE,
-    
+
     # Data models
     PromptMetadata,
-    
+
     # Helper functions
     create_prompt_breakdown,
     create_routing_decision,
     create_cache_metadata,
     estimate_tokens,
     classify_error,
+    extract_azure_cache_metrics,
 )
 
 # Configure logging
@@ -66,15 +73,17 @@ class DatabaseQueryPlugin:
     the full two-phase optimization pattern for those operations.
     """
     
-    def __init__(self, kernel, memory=None):
+    def __init__(self, kernel, chat_completion=None, memory=None):
         """
         Initialize the plugin with kernel and get database schema.
-        
+
         Args:
             kernel: Semantic Kernel instance needed for AI SQL generation
+            chat_completion: Azure chat completion service for direct LLM calls with caching
             memory: ConversationMemory instance for context tracking
         """
         self.kernel = kernel
+        self.chat_completion = chat_completion
         self.db_path = DB_PATH
         self.schema = self._get_database_schema()
         self.memory = memory
@@ -306,14 +315,59 @@ SQL Query:"""
                     # STEP 6: Make LLM call (use optimized values)
                     # ═══════════════════════════════════════════════════════════════
                     full_prompt = f"{optimized_prompt}\n\n{user_message}"
-                    
+
+                    # Use ChatHistory for Azure prompt caching support
+                    from semantic_kernel.contents import ChatHistory
+                    from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+                        AzureChatPromptExecutionSettings,
+                    )
+
+                    sql_history = ChatHistory()
+                    sql_history.add_system_message(optimized_prompt)
+                    sql_history.add_user_message(user_message)
+
+                    # Create isolated execution settings WITHOUT function calling
+                    sql_settings = AzureChatPromptExecutionSettings()
+                    sql_settings.max_tokens = max_tokens_limit
+                    sql_settings.temperature = 0.0  # SQL generation should be deterministic
+
                     llm_start_time = time.time()
-                    result = await self.kernel.invoke_prompt(full_prompt)
+                    if self.chat_completion:
+                        result = await self.chat_completion.get_chat_message_content(
+                            chat_history=sql_history,
+                            settings=sql_settings,
+                        )
+                    else:
+                        result = await self.kernel.invoke_prompt(full_prompt)
                     latency_ms = (time.time() - llm_start_time) * 1000
-                    
+
                     generated_sql = str(result).strip()
-                    prompt_tokens = estimate_tokens(full_prompt)
-                    completion_tokens = estimate_tokens(generated_sql)
+
+                    # Extract Azure cache metrics
+                    azure_cache_metrics = {}
+                    if self.chat_completion and hasattr(result, 'metadata'):
+                        azure_cache_metrics = extract_azure_cache_metrics(result, optimized_prompt)
+                        if azure_cache_metrics.get("cached_prompt_tokens", 0) > 0:
+                            logger.info(f"[SQL_GEN] ✅ Azure cache hit! {azure_cache_metrics['cached_prompt_tokens']:,} tokens cached")
+
+                    # Extract token usage from metadata
+                    prompt_tokens = 0
+                    completion_tokens = 0
+                    if hasattr(result, 'metadata') and result.metadata:
+                        usage = result.metadata.get('usage')
+                        if usage:
+                            if hasattr(usage, 'prompt_tokens'):
+                                prompt_tokens = usage.prompt_tokens or 0
+                                completion_tokens = usage.completion_tokens or 0
+                            elif isinstance(usage, dict):
+                                prompt_tokens = usage.get('prompt_tokens', 0)
+                                completion_tokens = usage.get('completion_tokens', 0)
+
+                    # Fallback to estimation if not available
+                    if not prompt_tokens:
+                        prompt_tokens = estimate_tokens(full_prompt)
+                    if not completion_tokens:
+                        completion_tokens = estimate_tokens(generated_sql)
                     
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 7: Detect streaming candidates
@@ -350,13 +404,14 @@ SQL Query:"""
                         user_message_tokens=estimate_tokens(user_message),
                     )
                     
-                    # LLM Judge evaluation
-                    quality_eval = await judge.maybe_evaluate(
+                    # LLM Judge evaluation (fire-and-forget - doesn't block response)
+                    fire_and_forget_judge(
                         operation=operation,
                         prompt=full_prompt,
                         response=generated_sql,
                         llm_client=self.kernel,
                     )
+                    quality_eval = None  # Judge runs in background
                     
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 10: Track with Observatory (CRITICAL - INCLUDE PHASE)
@@ -371,37 +426,40 @@ SQL Query:"""
                         agent_role="analyst",
                         operation=operation,
                         success=True,
-                        
+
                         # Prompt content
                         system_prompt=optimized_prompt,
                         user_message=user_message,
                         response_text=generated_sql,
                         prompt_breakdown=prompt_breakdown,
-                        
+
                         # Optimization tracking
                         routing_decision=routing_meta,
-                        cache_metadata=None, 
+                        cache_metadata=None,
                         quality_evaluation=quality_eval,
                         prompt_metadata=None,
-                        
+
                         # Model configuration
                         temperature=0.0,  # SQL generation should be deterministic
                         max_tokens=max_tokens_limit,
-                        
+
                         # Token breakdown
                         system_prompt_tokens=estimate_tokens(optimized_prompt),
                         user_message_tokens=estimate_tokens(user_message),
-                        
+
                         # Conversation linking
                         conversation_id=self.memory.conversation_id if self.memory else None,
                         turn_number=self.memory.turn_number if self.memory else None,
                         parent_call_id=self.memory.request_id if self.memory else None,
                         request_id=str(uuid.uuid4()),
-                        
+
                         # Observability
                         trace_id=self.memory.conversation_id if self.memory else None,
                         environment=os.getenv("ENVIRONMENT", "development"),
-                        
+
+                        # Azure prompt cache metrics
+                        **azure_cache_metrics,
+
                         # Metadata - CRITICAL: Include phase
                         metadata={
                             "phase": CURRENT_PHASE,  # ← CRITICAL
@@ -414,6 +472,38 @@ SQL Query:"""
                     )
                     
                     logger.info(f"📊 Tracked SQL generation: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 11: Track batch, sequential, and token efficiency
+                    # ═══════════════════════════════════════════════════════════════
+                    # Generate unique call ID for linking
+                    call_id = str(uuid.uuid4())
+                    
+                    # Track sequential calls (SQL generation calls over time)
+                    sequential_detector.track_call(
+                        operation=operation,
+                        call_id=call_id,
+                        latency_ms=latency_ms,
+                        agent_name="DatabaseQuery",
+                    )
+                    
+                    # Track batch opportunities (rapid sequential SQL calls)
+                    batch_detector.track_call(
+                        operation=operation,
+                        call_id=call_id,
+                        latency_ms=latency_ms,
+                        agent_name="DatabaseQuery",
+                    )
+                    
+                    # Check token efficiency (SQL prompts should be concise)
+                    if completion_tokens > 0:
+                        token_efficiency_detector.check_call(
+                            operation=operation,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            call_id=call_id,
+                            agent_name="DatabaseQuery",
+                        )
             
             # ═══════════════════════════════════════════════════════════════
             # SQL EXECUTION (common path for all branches above)

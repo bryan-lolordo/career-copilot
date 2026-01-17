@@ -16,6 +16,7 @@ To modify:
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -58,7 +59,12 @@ from observatory_config import (
     batch_detector,
     parallel_detector,
     streaming_detector,
+    sequential_detector,        
+    context_growth_detector,    
+    token_efficiency_detector,  
     judge,
+    batch_processor,       
+    parallel_executor,
     
     # Session management
     start_session,
@@ -84,6 +90,7 @@ from observatory_config import (
     create_routing_decision,
     create_cache_metadata,
     estimate_tokens,
+    fire_and_forget_judge,  # Non-blocking judge evaluation
 )
 
 load_dotenv()
@@ -304,23 +311,23 @@ def create_kernel_with_plugins(memory: ConversationMemory = None):
     
     # Register all plugins with memory where relevant
     kernel.add_plugin(JobPlugin(context=memory.context, memory=memory), plugin_name="JobPlugin")
-    
+
     # Create matching plugin instance (reused across others)
     resume_matching_plugin = ResumeMatchingPlugin(kernel, chat_completion, db_service, memory)
     kernel.add_plugin(resume_matching_plugin, plugin_name="ResumeMatching")
-    
+
     # Preprocessor plugins (no memory needed)
     kernel.add_plugin(ResumePreprocessorPlugin(), plugin_name="ResumePreprocessorPlugin")
     kernel.add_plugin(JobPreprocessorPlugin(), plugin_name="JobPreprocessorPlugin")
-    
-    # Database querying with memory awareness
-    kernel.add_plugin(DatabaseQueryPlugin(kernel, memory), plugin_name="DatabaseQueryPlugin")
-    
-    # Resume tailoring with memory
-    kernel.add_plugin(ResumeTailoringPlugin(kernel, memory), plugin_name="ResumeTailoring")
-    
-    # Self-improving match plugin (depends on matching plugin + memory)
-    self_improving_plugin = SelfImprovingMatchPlugin(kernel, resume_matching_plugin, memory.context, memory=memory)
+
+    # Database querying with memory awareness and Azure caching support
+    kernel.add_plugin(DatabaseQueryPlugin(kernel, chat_completion, memory), plugin_name="DatabaseQueryPlugin")
+
+    # Resume tailoring with memory and Azure caching support
+    kernel.add_plugin(ResumeTailoringPlugin(kernel, chat_completion, memory), plugin_name="ResumeTailoring")
+
+    # Self-improving match plugin (depends on matching plugin + memory) with Azure caching support
+    self_improving_plugin = SelfImprovingMatchPlugin(kernel, resume_matching_plugin, chat_completion, memory.context, memory=memory)
     kernel.add_plugin(self_improving_plugin, plugin_name="SelfImprovingMatch")
     
     return kernel, chat_completion, db_service, memory
@@ -468,7 +475,80 @@ def get_tool_definitions_tokens(kernel) -> int:
         return 12000  # Conservative estimate for ~60 functions
 
 
+def create_chat_history_with_system_prompt_cached(kernel: Kernel = None) -> ChatHistory:
+    """Create chat history optimized for GPT-4o-mini prompt caching."""
+    history = ChatHistory()
+    history.add_system_message(SYSTEM_PROMPT)
+    
+    # Add lightweight tool reference for caching
+    if kernel:
+        tool_count = sum(len(plugin.functions) for plugin in kernel.plugins.values())
+        tool_summary = f"# Available Tools\n\nYou have {tool_count} function tools available via Semantic Kernel."
+        history.add_system_message(tool_summary)
+        logger.info(f"✅ Created cache-optimized history: ~1,634 tokens cached")
+    
+    return history
 
+def extract_cache_metrics(result) -> dict:
+    """Extract cache metrics from GPT-4o-mini response."""
+    metrics = {"cached_tokens": 0, "cache_hit": False, "uncached_tokens": 0}
+    
+    if hasattr(result, 'metadata') and result.metadata:
+        usage = result.metadata.get("usage")
+        if usage:
+            # Handle both dict and object formats
+            if hasattr(usage, 'prompt_tokens_details'):
+                # Object format (OpenAI SDK)
+                prompt_tokens_details = usage.prompt_tokens_details
+                if hasattr(prompt_tokens_details, 'cached_tokens'):
+                    metrics["cached_tokens"] = prompt_tokens_details.cached_tokens or 0
+                
+                total_prompt = usage.prompt_tokens or 0
+            elif isinstance(usage, dict):
+                # Dict format (some other clients)
+                prompt_tokens_details = usage.get("prompt_tokens_details", {})
+                metrics["cached_tokens"] = prompt_tokens_details.get("cached_tokens", 0)
+                total_prompt = usage.get("prompt_tokens", 0)
+            else:
+                total_prompt = 0
+            
+            if metrics["cached_tokens"] > 0:
+                metrics["cache_hit"] = True
+                metrics["uncached_tokens"] = total_prompt - metrics["cached_tokens"]
+            else:
+                metrics["uncached_tokens"] = total_prompt
+    
+    return metrics
+
+def calculate_cache_savings(cache_metrics: dict) -> dict:
+    """Calculate cost savings from caching."""
+    cached = cache_metrics["cached_tokens"]
+    uncached = cache_metrics["uncached_tokens"]
+    cost_saved = cached * 0.000003
+    return {"cost_saved": cost_saved, "tokens_saved": cached}
+
+
+def compute_prompt_prefix_hash(prompt: str, prefix_length: int = 500) -> str:
+    """
+    Compute a prefix hash for categorizing Azure prompt caching by stable prefix.
+
+    This matches the observatory's PrefixCacheDetector pattern:
+    - Takes first `prefix_length` characters of the prompt
+    - Computes MD5 hash
+    - Returns first 16 characters of the hash
+
+    Use this to group calls by their system prompt prefix (stable_prefix category).
+    Azure's prompt caching benefits from consistent prefixes across calls.
+
+    Args:
+        prompt: The system prompt to hash
+        prefix_length: Number of characters to use for prefix (default: 500)
+
+    Returns:
+        16-character hash string for grouping by prefix category
+    """
+    prefix = prompt[:prefix_length] if len(prompt) > prefix_length else prompt
+    return hashlib.md5(prefix.encode()).hexdigest()[:16]
 
 
 # ============================================================================
@@ -503,7 +583,10 @@ async def main():
     
     # Create execution settings and chat history
     execution_settings = create_execution_settings()
-    history = create_chat_history_with_system_prompt()
+    history = create_chat_history_with_system_prompt_cached(kernel=kernel)
+
+    # Link chat history to memory for trimming
+    memory.chat_history = history 
     
     # Calculate tool definition tokens once (reused across all calls)
     tool_definitions_tokens = get_tool_definitions_tokens(kernel)
@@ -589,7 +672,7 @@ async def main():
             # STEP 2: Check semantic cache (if available)
             # ═══════════════════════════════════════════════════════════════
             if semantic_cache:
-                result = semantic_cache.get(operation=operation, prompt=userInput)
+                result = await semantic_cache.get(operation=operation, prompt=userInput)
                 if result.hit:  # False in baseline, True in optimized if similar match
                     # Track semantic cache hit
                     track_llm_call(
@@ -621,19 +704,27 @@ async def main():
             # ═══════════════════════════════════════════════════════════════
             # STEP 3: Get optimized prompt and max_tokens
             # ═══════════════════════════════════════════════════════════════
-            optimized_prompt, max_tokens_limit, prompt_meta = prompt_optimizer.get_optimized_prompt(
+            # optimized_prompt, max_tokens_limit, prompt_meta = prompt_optimizer.get_optimized_prompt(
+            #     operation=operation,
+            #     default_prompt=SYSTEM_PROMPT
+            # )
+            # Returns: default in baseline, compressed in optimized
+            
+            _, max_tokens_limit, prompt_meta = prompt_optimizer.get_optimized_prompt(
                 operation=operation,
                 default_prompt=SYSTEM_PROMPT
             )
-            # Returns: default in baseline, compressed in optimized
-            
+            # Override: Use original prompt to preserve cache (ignore optimizer's prompt)
+            optimized_prompt = SYSTEM_PROMPT
+
             # ═══════════════════════════════════════════════════════════════
             # STEP 4: Get routed model
             # ═══════════════════════════════════════════════════════════════
-            routed_model, routing_meta = router.route(
+            routed_model, routing_meta = router.select(
                 operation=operation,
-                prompt_tokens=estimate_tokens(optimized_prompt),
-                complexity=0.5  # Medium complexity for chat
+                prompt=optimized_prompt,  # ← Use 'prompt' not 'prompt_tokens'
+                estimated_tokens=estimate_tokens(optimized_prompt),  # ← Use 'estimated_tokens'
+                complexity=0.5
             )
             # Returns: default model in baseline, routed model in optimized
             
@@ -654,12 +745,28 @@ async def main():
             execution_settings.max_tokens = max_tokens_limit
             
             # Update system prompt in history if it was optimized
-            if optimized_prompt != SYSTEM_PROMPT and len(history.messages) > 0:
-                if history.messages[0].role.value.lower() in ['system', 'developer']:
-                    history.messages[0].content = optimized_prompt
+            # if optimized_prompt != SYSTEM_PROMPT and len(history.messages) > 0:
+            #     if history.messages[0].role.value.lower() in ['system', 'developer']:
+            #         history.messages[0].content = optimized_prompt
             
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 5.5: Trim chat history to prevent context bloat
+            # ═══════════════════════════════════════════════════════════════
+            messages_removed = 0
+            tokens_saved = 0
+            if message_count > 1:  # Skip first message (no history yet)
+                history, messages_removed, tokens_saved = memory.trim_history(
+                    chat_history=history,
+                    max_turns=10,       # Keep last 10 turns
+                    max_tokens=5000,   # Max 5,000 tokens of history
+                    preserve_system=True
+                )
+                
             start_time = time.time()
-            
+
+            # Initialize cache_metrics with defaults (will be populated on success)
+            cache_metrics = {"cached_tokens": 0, "cache_hit": False, "uncached_tokens": 0}
+
             try:
                 # Make the actual LLM call
                 result = await chat_completion.get_chat_message_content(
@@ -667,14 +774,24 @@ async def main():
                     settings=execution_settings,
                     kernel=kernel,
                 )
-                
+
                 latency_ms = (time.time() - start_time) * 1000
                 response_text = str(result)
                 success = True
                 error = None
                 error_type = None
                 error_code = None
-                error_category = None
+
+                # Extract cache metrics from Azure response
+                cache_metrics = extract_cache_metrics(result)
+                if cache_metrics["cache_hit"]:
+                    savings = calculate_cache_savings(cache_metrics)
+                    logger.info(
+                        f"✅ Cache hit! {cache_metrics['cached_tokens']:,} tokens cached - "
+                        f"saved ${savings['cost_saved']:.4f}"
+                    )
+                elif message_count > 1:
+                    logger.info(f"ℹ️  Cache miss (expected on first message)")
                 
             except Exception as e:
                 latency_ms = (time.time() - start_time) * 1000
@@ -687,7 +804,7 @@ async def main():
                 error_info = classify_error(e, operation=operation)
                 error_type = error_info['error_type']
                 error_code = error_info['error_code']
-                error_category = error_info['error_category']
+                
                 
                 logger.error(f"LLM call failed: {error_type} - {error_code}")
                 result = None
@@ -729,6 +846,38 @@ async def main():
                 latency_ms=latency_ms,
                 completion_tokens=completion_tokens,
             )
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 8.5: Detect context growth and token inefficiency (NEW)
+            # ═══════════════════════════════════════════════════════════════
+            context_growth_alert = None
+            token_efficiency_alert = None
+            
+            if success and prompt_tokens > 0:
+                # Extract prompt breakdown from messages
+                system_prompt_tokens = estimate_tokens(optimized_prompt)
+                user_message_tokens = estimate_tokens(userInput)
+                chat_history_tokens = prompt_tokens - system_prompt_tokens - user_message_tokens - tool_definitions_tokens
+                
+                # Check for context growth (chat history bloat)
+                if chat_history_tokens > 0:
+                    context_growth_alert = context_growth_detector.check_call(
+                        operation=operation,
+                        chat_history_tokens=chat_history_tokens,
+                        total_prompt_tokens=prompt_tokens,
+                        call_id=turn_request_id,
+                        agent_name="ChatAgent",
+                    )
+                
+                # Check for token inefficiency (high prompt/completion ratio)
+                if completion_tokens > 0:
+                    token_efficiency_alert = token_efficiency_detector.check_call(
+                        operation=operation,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        call_id=turn_request_id,
+                        agent_name="ChatAgent",
+                    )
             
             # ═══════════════════════════════════════════════════════════════
             # STEP 9: Cache the response (if successful)
@@ -741,7 +890,7 @@ async def main():
                 )
                 
                 if semantic_cache:
-                    semantic_cache.set(
+                    await semantic_cache.set(
                         operation=operation,
                         prompt=userInput,
                         response=response_text
@@ -754,15 +903,16 @@ async def main():
             # Extract messages for prompt breakdown
             messages_for_breakdown = extract_messages_from_history(history)
             
-            # LLM Judge evaluation (if enabled and successful)
+            # LLM Judge evaluation (fire-and-forget - doesn't block response)
             quality_eval = None
             if success:
-                quality_eval = await judge.maybe_evaluate(
+                fire_and_forget_judge(
                     operation=operation,
                     prompt=userInput,
                     response=response_text,
                     llm_client=kernel,
                 )
+                # quality_eval stays None - judge runs in background
             
             # Track in Observatory with all 139 fields
             track_llm_call(
@@ -787,7 +937,7 @@ async def main():
                 routing_decision=routing_meta,  # From Step 4
                 cache_metadata=cache_meta,  # From Step 1
                 quality_evaluation=quality_eval,
-                prompt_metadata=prompt_meta,  # From Step 3
+                prompt_metadata=None,  # From Step 3
                 
                 # Conversation linking
                 conversation_id=memory.conversation_id,
@@ -815,8 +965,12 @@ async def main():
                 # Error details (if failed)
                 error_type=error_type,
                 error_code=error_code,
-                error_category=error_category,
-                
+
+                # Azure prompt cache metrics (stable_prefix category)
+                cached_prompt_tokens=cache_metrics.get("cached_tokens", 0),
+                cached_token_savings=calculate_cache_savings(cache_metrics)["cost_saved"] if cache_metrics.get("cache_hit") else 0.0,
+                prompt_prefix_hash=compute_prompt_prefix_hash(optimized_prompt),
+
                 # Observability
                 trace_id=memory.conversation_id,
                 request_id=turn_request_id,
@@ -828,7 +982,17 @@ async def main():
                     "message_number": message_count,
                     "system_prompt_version": SYSTEM_PROMPT_VERSION,
                     "judged": quality_eval is not None,
-                    "streaming_candidate": streaming_candidate,
+                    "streaming_candidate": streaming_candidate is not None,
+                    "context_growth_alert": context_growth_alert is not None,
+                    "token_efficiency_alert": token_efficiency_alert is not None,
+                    # Cache metrics
+                    "cache_hit": cache_metrics.get("cache_hit", False),
+                    "cached_tokens": cache_metrics.get("cached_tokens", 0),
+                    "uncached_tokens": cache_metrics.get("uncached_tokens", 0),
+                    # History trimming metrics (NEW)
+                    "history_trimmed": messages_removed > 0 if 'messages_removed' in locals() else False,
+                    "messages_removed": messages_removed if 'messages_removed' in locals() else 0,
+                    "tokens_saved_by_trimming": tokens_saved if 'tokens_saved' in locals() else 0,
                 }
             )
             
@@ -839,6 +1003,14 @@ async def main():
                 operation=operation,
                 call_id=turn_request_id,
                 latency_ms=latency_ms,
+                agent_name="ChatAgent",
+            )
+            
+            sequential_detector.track_call(
+                operation=operation,
+                call_id=turn_request_id,
+                latency_ms=latency_ms,
+                agent_name="ChatAgent",
             )
             
             # Display response to user
@@ -851,19 +1023,17 @@ async def main():
                 print(f"Assistant > ❌ {response_text}")
         
         # Show final statistics
-        if cache.enabled:
-            print(f"\n📊 Cache Statistics:")
-            print(f"   Hit Rate: {cache._hits / max(cache._hits + cache._misses, 1):.1%}")
-            print(f"   Hits: {cache._hits}, Misses: {cache._misses}")
+        # if cache.enabled:
+        #     print(f"\n📊 Cache Statistics:")
+        #     print(f"   Hit Rate: {cache._hits / max(cache._hits + cache._misses, 1):.1%}")
+        #     print(f"   Hits: {cache._hits}, Misses: {cache._misses}")
         
-        if semantic_cache and semantic_cache.enabled:
-            print(f"   Semantic Hits: {semantic_cache._hits}")
+        # if semantic_cache and semantic_cache.enabled:
+        #     print(f"   Semantic Hits: {semantic_cache._hits}")
+        print(f"\n✅ Session complete! Check Observatory data for cache statistics.")
         
         # End session successfully
-        end_session(session, success=True, metadata={
-            "total_messages": message_count,
-            "phase": CURRENT_PHASE,
-        })
+        end_session(session, success=True)
         logger.info(f"CLI session ended successfully. Total messages: {message_count}")
         
     except Exception as e:

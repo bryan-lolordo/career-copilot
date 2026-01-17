@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(findstr:*)",
+      "Bash(pip show:*)",
+      "Bash(dir:*)",
+      "Bash(python:*)",
+      "Bash(sqlite3:*)",
+      "Bash(if exist cachesemantic_cache rmdir /S /Q cachesemantic_cache)",
+      "Bash(grep:*)",
+      "Bash(ls:*)"
+    ]
+  }
+}

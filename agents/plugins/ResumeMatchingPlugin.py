@@ -12,6 +12,7 @@ import logging
 import time
 import os
 import uuid
+import hashlib
 
 # ═════════════════════════════════════════════════════════════════════════
 # OBSERVATORY INTEGRATION - STANDARDIZED IMPORT BLOCK FOR LLM-MAKING PLUGINS
@@ -19,17 +20,23 @@ import uuid
 from observatory_config import (
     # Main tracking
     track_llm_call,
-    
+
     # Optimization components (10-step pattern - import ALL for consistency)
     cache,
-    semantic_cache,
+    persistent_cache,  # SQLite-backed cache for cross-session persistence
+    # semantic_cache,  # Disabled for resume matching
     prefix_cache,
     router,
     prompt_optimizer,
-    streaming_detector,
     batch_detector,
     parallel_detector,
+    streaming_detector,
+    sequential_detector,        
+    context_growth_detector,    
+    token_efficiency_detector,  
     judge,
+    batch_processor,       
+    parallel_executor,
     
     # Config constants
     DEFAULT_MODEL,
@@ -42,9 +49,11 @@ from observatory_config import (
     create_prompt_metadata,
     create_prompt_breakdown,
     create_routing_decision,
-    create_cache_metadata,
+    # create_cache_metadata,  # Not needed without semantic cache
     estimate_tokens,
     classify_error,
+    extract_azure_cache_metrics,
+    fire_and_forget_judge,  # Non-blocking judge evaluation
 )
 
 # Configure logging
@@ -482,21 +491,119 @@ class ResumeMatchingPlugin:
             
             logger.info(f"Phase 1: Quick scoring {len(jobs)} jobs...")
             quick_score_start = time.time()
-            
-            # PHASE 1: Quick scoring for ALL jobs
-            scored_jobs = []
-            for i, job in enumerate(jobs, 1):
-                logger.debug(f"Quick scoring job {i}/{len(jobs)}: {job.get('title', 'Unknown')}")
-                job_start_time = time.time()
-                
-                scored = await self._quick_score_job_match(resume_text, job)
-                scored_jobs.append(scored)
-                
-                job_latency = (time.time() - job_start_time) * 1000
-                logger.debug(f"  └─ Score: {scored['score']}/100, Latency: {job_latency:.0f}ms")
-            
+
+            # PHASE 1: Quick scoring
+            # BASELINE: Sequential execution (detect opportunities)
+            # OPTIMIZED: Batch + parallel execution (apply optimization)
+            phase1_metrics = None
+
+            if CURRENT_PHASE == "optimized":
+                # ═══════════════════════════════════════════════════════════════
+                # OPTIMIZED: Batch + parallel execution
+                # ═══════════════════════════════════════════════════════════════
+                batches = batch_processor.create_batches(
+                    items=jobs,
+                    batch_size=3,
+                    operation="quick_score_job"
+                )
+
+                logger.info(f"⚡ OPTIMIZED: Created {len(batches)} batches from {len(jobs)} jobs")
+
+                # Define batch processing function
+                async def score_batch(batch, batch_num):
+                    """Score all jobs in a batch sequentially."""
+                    results = []
+                    for i, job in enumerate(batch):
+                        job_idx = (batch_num * 3) + i + 1
+                        logger.debug(f"Quick scoring job {job_idx}/{len(jobs)}: {job.get('title', 'Unknown')}")
+
+                        job_start_time = time.time()
+                        scored = await self._quick_score_job_match(resume_text, job)
+                        results.append(scored)
+
+                        job_latency = (time.time() - job_start_time) * 1000
+                        logger.debug(f"  └─ Score: {scored['score']}/100, Latency: {job_latency:.0f}ms")
+
+                    return results
+
+                # Execute batches in parallel (max 3 concurrent batches)
+                batch_results, phase1_metrics = await parallel_executor.execute(
+                    batches=batches,
+                    process_func=score_batch,
+                    max_concurrent=3,
+                    operation="quick_score_job",
+                    return_metrics=True
+                )
+
+                # Flatten results
+                scored_jobs = []
+                for batch_result in batch_results:
+                    if batch_result:
+                        scored_jobs.extend(batch_result)
+
+            else:
+                # ═══════════════════════════════════════════════════════════════
+                # BASELINE: Sequential execution (detect opportunities)
+                # ═══════════════════════════════════════════════════════════════
+                logger.info(f"📊 BASELINE: Sequential scoring of {len(jobs)} jobs")
+                scored_jobs = []
+                for i, job in enumerate(jobs):
+                    logger.debug(f"Quick scoring job {i+1}/{len(jobs)}: {job.get('title', 'Unknown')}")
+
+                    job_start_time = time.time()
+                    scored = await self._quick_score_job_match(resume_text, job)
+                    scored_jobs.append(scored)
+
+                    job_latency = (time.time() - job_start_time) * 1000
+                    logger.debug(f"  └─ Score: {scored['score']}/100, Latency: {job_latency:.0f}ms")
+
             quick_score_duration = time.time() - quick_score_start
-            logger.info(f"Phase 1 complete: {len(jobs)} jobs scored in {quick_score_duration:.1f}s")
+
+            if CURRENT_PHASE == "optimized":
+                logger.info(f"Phase 1 complete: {len(scored_jobs)} jobs scored in {quick_score_duration:.1f}s (batch+parallel)")
+                if phase1_metrics and phase1_metrics.time_saved_ms > 0:
+                    logger.info(f"   ⚡ Time saved: {phase1_metrics.time_saved_ms:.0f}ms ({phase1_metrics.estimated_sequential_ms:.0f}ms seq → {phase1_metrics.total_elapsed_ms:.0f}ms parallel)")
+            else:
+                logger.info(f"Phase 1 complete: {len(scored_jobs)} jobs scored in {quick_score_duration:.1f}s (sequential)")
+
+            # ═══════════════════════════════════════════════════════════════
+            # WORKFLOW-LEVEL OPTIMIZATION DETECTION
+            # ═══════════════════════════════════════════════════════════════
+            if len(jobs) >= 2:
+                # Batch opportunity detection
+                batch_opportunity = batch_detector.analyze_workflow(
+                    operation="quick_score_job",
+                    call_count=len(jobs),
+                    total_duration_ms=quick_score_duration * 1000,
+                    metadata={
+                        "resume_id": resume_id,
+                        "phase": "quick_score",
+                        "jobs_processed": len(jobs),
+                    }
+                )
+                
+                if batch_opportunity:
+                    logger.info(f"💡 BATCH OPPORTUNITY DETECTED:")
+                    logger.info(f"   {len(jobs)} sequential calls → ~{(len(jobs)+2)//3} batches recommended")
+                    logger.info(f"   Estimated savings: 60% cost reduction")
+                
+                # Parallel opportunity detection
+                parallel_opportunity = parallel_detector.analyze_workflow(
+                    operation="quick_score_job",
+                    call_count=len(jobs),
+                    total_duration_ms=quick_score_duration * 1000,
+                    are_independent=True,  # These jobs don't depend on each other
+                    metadata={
+                        "resume_id": resume_id,
+                        "phase": "quick_score",
+                    }
+                )
+                
+                if parallel_opportunity:
+                    logger.info(f"⚡ PARALLEL OPPORTUNITY DETECTED:")
+                    logger.info(f"   {quick_score_duration:.1f}s sequential → ~{quick_score_duration/3:.1f}s with 3 concurrent")
+                    logger.info(f"   Estimated time savings: 66%")
+                
             
             # Sort by score
             scored_jobs.sort(key=lambda x: x['score'], reverse=True)
@@ -504,23 +611,70 @@ class ResumeMatchingPlugin:
             
             logger.info(f"Phase 2: Deep analysis on top {len(top_jobs)} jobs...")
             deep_analysis_start = time.time()
-            
-            # PHASE 2: Deep analysis for top matches
-            detailed_matches = []
-            for i, job in enumerate(top_jobs, 1):
-                logger.debug(f"Deep analysis {i}/{len(top_jobs)}: {job['title']}")
-                job_start_time = time.time()
-                
-                # Get full job details
-                full_job = self.db.get_job_by_id(job['job_id'])
-                detailed = await self._deep_analyze_job_match(resume_text, full_job, job['score'])
-                detailed_matches.append(detailed)
-                
-                job_latency = (time.time() - job_start_time) * 1000
-                logger.debug(f"  └─ Latency: {job_latency:.0f}ms")
-            
+
+            # PHASE 2: Deep analysis
+            # BASELINE: Sequential execution (detect opportunities)
+            # OPTIMIZED: Parallel execution (apply optimization)
+            phase2_metrics = None
+
+            if CURRENT_PHASE == "optimized":
+                # ═══════════════════════════════════════════════════════════════
+                # OPTIMIZED: Parallel execution
+                # ═══════════════════════════════════════════════════════════════
+                logger.info(f"⚡ OPTIMIZED: Parallel analysis of {len(top_jobs)} jobs")
+
+                async def analyze_job(batch, batch_idx):
+                    """Deep analyze a single job from batch."""
+                    job_data = batch[0]  # Each batch contains one job
+                    logger.debug(f"Deep analysis {batch_idx + 1}/{len(top_jobs)}: {job_data['title']}")
+
+                    job_start_time = time.time()
+                    full_job = self.db.get_job_by_id(job_data['job_id'])
+                    detailed = await self._deep_analyze_job_match(resume_text, full_job, job_data['score'])
+
+                    job_latency = (time.time() - job_start_time) * 1000
+                    logger.debug(f"  └─ Latency: {job_latency:.0f}ms")
+
+                    return detailed
+
+                # Each job is its own "batch" of size 1
+                job_batches = [[job] for job in top_jobs]
+
+                analysis_results, phase2_metrics = await parallel_executor.execute(
+                    batches=job_batches,
+                    process_func=analyze_job,
+                    max_concurrent=3,
+                    operation="deep_analyze_job",
+                    return_metrics=True
+                )
+
+                detailed_matches = [result for result in analysis_results if result]
+
+            else:
+                # ═══════════════════════════════════════════════════════════════
+                # BASELINE: Sequential execution (detect opportunities)
+                # ═══════════════════════════════════════════════════════════════
+                logger.info(f"📊 BASELINE: Sequential analysis of {len(top_jobs)} jobs")
+                detailed_matches = []
+                for i, job_data in enumerate(top_jobs):
+                    logger.debug(f"Deep analysis {i + 1}/{len(top_jobs)}: {job_data['title']}")
+
+                    job_start_time = time.time()
+                    full_job = self.db.get_job_by_id(job_data['job_id'])
+                    detailed = await self._deep_analyze_job_match(resume_text, full_job, job_data['score'])
+                    detailed_matches.append(detailed)
+
+                    job_latency = (time.time() - job_start_time) * 1000
+                    logger.debug(f"  └─ Latency: {job_latency:.0f}ms")
+
             deep_analysis_duration = time.time() - deep_analysis_start
-            logger.info(f"Phase 2 complete: {len(top_jobs)} jobs analyzed in {deep_analysis_duration:.1f}s")
+
+            if CURRENT_PHASE == "optimized":
+                logger.info(f"Phase 2 complete: {len(detailed_matches)} jobs analyzed in {deep_analysis_duration:.1f}s (parallel)")
+                if phase2_metrics and phase2_metrics.time_saved_ms > 0:
+                    logger.info(f"   ⚡ Time saved: {phase2_metrics.time_saved_ms:.0f}ms ({phase2_metrics.estimated_sequential_ms:.0f}ms seq → {phase2_metrics.total_elapsed_ms:.0f}ms parallel)")
+            else:
+                logger.info(f"Phase 2 complete: {len(detailed_matches)} jobs analyzed in {deep_analysis_duration:.1f}s (sequential)")
             
             # Save to database
             for match in detailed_matches:
@@ -1049,25 +1203,35 @@ Description: {job.get('description', 'N/A')[:1500]}"""
             routed_model = DEFAULT_MODEL  # Default
             
             # ═══════════════════════════════════════════════════════════════
-            # STEP 1: Check exact cache
+            # STEP 1: Check persistent cache first (survives restarts), then in-memory
             # ═══════════════════════════════════════════════════════════════
             operation = "quick_score_job"
             cache_key_data = {
                 "job_id": job.get('id'),
-                "resume_text_hash": hash(resume_text[:2000])
+                "resume_text_hash": hashlib.md5(resume_text[:2000].encode()).hexdigest()
             }
-            
-            cached_result, cache_meta = cache.get(
+
+            # Try persistent cache first (SQLite - survives restarts)
+            cached_result, cache_meta = persistent_cache.get(
                 operation=operation,
                 key_data=cache_key_data
             )
-            
+            cache_source = "persistent"
+
+            # Fall back to in-memory cache if no persistent hit
+            if not cached_result:
+                cached_result, cache_meta = cache.get(
+                    operation=operation,
+                    key_data=cache_key_data
+                )
+                cache_source = "memory"
+
             # Ensure cache_meta is None if empty dict
             if isinstance(cache_meta, dict) and not cache_meta:
                 cache_meta = None
-            
+
             if cached_result:
-                logger.debug(f"✅ Cache hit for job {job.get('id')}")
+                logger.debug(f"✅ Cache hit ({cache_source}) for job {job.get('id')}")
                 result_str = cached_result
                 latency_ms = 1.0
                 prompt_tokens = 0
@@ -1093,62 +1257,17 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                     metadata={
                         "phase": CURRENT_PHASE,
                         "cache_hit": True,
+                        "cache_source": cache_source,
                         "job_id": job.get('id'),
                         "job_title": job.get('title', 'Unknown'),
                     }
                 )
-                
+
                 # Skip to result parsing
             
             else:
-                # ═══════════════════════════════════════════════════════════════
-                # STEP 2: Check semantic cache (if available)
-                # ═══════════════════════════════════════════════════════════════
-                semantic_hit = False  # Track if semantic cache hit
-                
-                if semantic_cache:
-                    full_prompt = f"{system_prompt}\n\n{user_message}"
-                    result = await semantic_cache.get(operation=operation, prompt=full_prompt)
-                    if result.hit:
-                        logger.debug(f"✅ Semantic cache hit ({result.similarity:.1%}) for job {job.get('id')}")
-                        result_str = result.response
-                        latency_ms = 1.0
-                        prompt_tokens = 0
-                        completion_tokens = 0
-                        semantic_hit = True
-                        
-                        # Track semantic cache hit
-                        track_llm_call(
-                            operation=operation,
-                            prompt_tokens=0,
-                            completion_tokens=0,
-                            latency_ms=1.0,
-                            success=True,
-                            response_text=result_str,
-                            cache_metadata=create_cache_metadata(
-                                cache_hit=True,
-                                similarity_score=result.similarity
-                            ),
-                            agent_name="ResumeMatching",
-                            agent_role="analyst",
-                            conversation_id=self.memory.conversation_id if self.memory else None,
-                            turn_number=self.memory.turn_number if self.memory else None,
-                            parent_call_id=self.memory.request_id if self.memory else None,
-                            request_id=str(uuid.uuid4()),
-                            trace_id=self.memory.conversation_id if self.memory else None,
-                            environment=os.getenv("ENVIRONMENT", "development"),
-                            metadata={
-                                "phase": CURRENT_PHASE,
-                                "semantic_cache_hit": True,
-                                "similarity": result.similarity,
-                                "job_id": job.get('id'),
-                            }
-                        )
-                        
-                        # Skip to result parsing
-                
                 # If no cache hit, proceed with LLM call
-                if not cached_result and not semantic_hit:
+                if not cached_result:
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 3: Get optimized prompt and max_tokens
                     # ═══════════════════════════════════════════════════════════════
@@ -1224,6 +1343,11 @@ Description: {job.get('description', 'N/A')[:1500]}"""
 
                     result_str = str(result)
 
+                    # Extract Azure cache metrics (stable_prefix category)
+                    azure_cache_metrics = extract_azure_cache_metrics(result, optimized_prompt)
+                    if azure_cache_metrics.get("cached_prompt_tokens", 0) > 0:
+                        logger.info(f"[QUICK_SCORE] ✅ Azure cache hit! {azure_cache_metrics['cached_prompt_tokens']:,} tokens cached")
+
                     # DEBUG LOGGING: See what we got back
                     logger.info(f"[QUICK_SCORE] === LLM RESPONSE ===")
                     logger.info(f"[QUICK_SCORE] Raw response (first 500 chars):\n{result_str[:500]}")
@@ -1255,23 +1379,23 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                     )
 
                     # ═══════════════════════════════════════════════════════════════
-                    # STEP 8: Cache the response
+                    # STEP 8: Cache the response (both persistent and in-memory)
                     # ═══════════════════════════════════════════════════════════════
+                    # Store in persistent cache (SQLite - survives restarts)
+                    persistent_cache.set(
+                        operation=operation,
+                        key_data=cache_key_data,
+                        value=result_str
+                    )
+                    # Also store in memory cache (faster for same-session lookups)
                     cache.set(
                         operation=operation,
                         key_data=cache_key_data,
                         value=result_str
                     )
-                    
-                    if semantic_cache:
-                        await semantic_cache.set(
-                            operation=operation,
-                            prompt=full_prompt,
-                            response=result_str
-                        )
-                    
+
                     # ═══════════════════════════════════════════════════════════════
-                    # STEP 9: Create prompt breakdown and evaluate quality
+                    # STEP 9: Create prompt breakdown and evaluate quality (quick_score)
                     # ═══════════════════════════════════════════════════════════════
                     prompt_breakdown = create_prompt_breakdown(
                         system_prompt=optimized_prompt,
@@ -1279,9 +1403,9 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                         user_message=user_message,
                         user_message_tokens=estimate_tokens(user_message),
                     )
-                    
-                    # LLM Judge evaluation
-                    quality_eval = await judge.maybe_evaluate(
+
+                    # LLM Judge evaluation (fire-and-forget - doesn't block response)
+                    fire_and_forget_judge(
                         operation=operation,
                         prompt=full_prompt[:5000],
                         response=result_str[:5000],
@@ -1289,7 +1413,8 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                         conversation_id=self.memory.conversation_id if self.memory else None,
                         turn_number=self.memory.turn_number if self.memory else None,
                     )
-                    
+                    quality_eval = None  # Judge runs in background
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 10: Track with Observatory (CRITICAL - INCLUDE PHASE)
                     # ═══════════════════════════════════════════════════════════════
@@ -1333,7 +1458,10 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                         # Observability
                         trace_id=self.memory.conversation_id if self.memory else None,
                         environment=os.getenv("ENVIRONMENT", "development"),
-                        
+
+                        # Azure prompt cache metrics (stable_prefix category)
+                        **azure_cache_metrics,
+
                         # Metadata - CRITICAL: Include phase
                         metadata={
                             "phase": CURRENT_PHASE,
@@ -1343,15 +1471,35 @@ Description: {job.get('description', 'N/A')[:1500]}"""
                             "streaming_candidate": bool(streaming_candidate),
                         }
                     )
-                    
+
                     logger.debug(f"Quick score LLM call: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 11: Track batch detection (individual call)
+                    # ═══════════════════════════════════════════════════════════════
+                    # Generate unique call ID for linking
+                    call_id = str(uuid.uuid4())
+
+                    batch_detector.track_call(
+                        operation=operation,
+                        call_id=call_id,
+                        latency_ms=latency_ms,
+                        agent_name="ResumeMatching",
+                    )
+                    
+                    # Check token efficiency (should be low prompt/completion ratio for scoring)
+                    if completion_tokens > 0:
+                        token_efficiency_detector.check_call(
+                            operation=operation,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            call_id=call_id,
+                            agent_name="ResumeMatching",
+                        )
             
             # ═══════════════════════════════════════════════════════════════
             # RESULT PARSING (common path for all branches above)
             # ═══════════════════════════════════════════════════════════════
-            
-            # ✅ ADD THIS LINE HERE:
-            logger.debug(f"Raw LLM response for {job.get('title', 'Unknown')}: {result_str[:500] if result_str else 'EMPTY'}")
             
             # Parse response
             if '```json' in result_str:
@@ -1509,25 +1657,35 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
             routed_model = DEFAULT_MODEL  # Default
 
             # ═══════════════════════════════════════════════════════════════
-            # STEP 1: Check exact cache
+            # STEP 1: Check persistent cache first (survives restarts), then in-memory
             # ═══════════════════════════════════════════════════════════════
             operation = "deep_analyze_job"
             cache_key_data = {
                 "job_id": job.get('id'),
-                "resume_text_hash": hash(resume_text[:4000])
+                "resume_text_hash": hashlib.md5(resume_text[:4000].encode()).hexdigest()
             }
-            
-            cached_result, cache_meta = cache.get(
+
+            # Try persistent cache first (SQLite - survives restarts)
+            cached_result, cache_meta = persistent_cache.get(
                 operation=operation,
                 key_data=cache_key_data
             )
-            
+            cache_source = "persistent"
+
+            # Fall back to in-memory cache if no persistent hit
+            if not cached_result:
+                cached_result, cache_meta = cache.get(
+                    operation=operation,
+                    key_data=cache_key_data
+                )
+                cache_source = "memory"
+
             # Ensure cache_meta is None if empty dict
             if isinstance(cache_meta, dict) and not cache_meta:
                 cache_meta = None
-            
+
             if cached_result:
-                logger.debug(f"✅ Cache hit for deep analysis of job {job.get('id')}")
+                logger.debug(f"✅ Cache hit ({cache_source}) for deep analysis of job {job.get('id')}")
                 result_str = cached_result
                 latency_ms = 1.0
                 prompt_tokens = 0
@@ -1553,66 +1711,20 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                     metadata={
                         "phase": CURRENT_PHASE,
                         "cache_hit": True,
+                        "cache_source": cache_source,
                         "job_id": job.get('id'),
                         "job_title": job.get('title', 'Unknown'),
                         "original_score": original_score,
                     }
                 )
-                
+
                 # Skip to result parsing
-            
+
             else:
-                # ═══════════════════════════════════════════════════════════════
-                # STEP 2: Check semantic cache (if available)
-                # ═══════════════════════════════════════════════════════════════
-                semantic_hit = False  # Track if semantic cache hit
-                
-                if semantic_cache:
-                    full_prompt = f"{system_prompt}\n\n{user_message}"
-                    result = await semantic_cache.get(operation=operation, prompt=full_prompt)
-                    if result.hit:
-                        logger.debug(f"✅ Semantic cache hit ({result.similarity:.1%}) for deep analysis of job {job.get('id')}")
-                        result_str = result.response
-                        latency_ms = 1.0
-                        prompt_tokens = 0
-                        completion_tokens = 0
-                        semantic_hit = True
-                        
-                        # Track semantic cache hit
-                        track_llm_call(
-                            operation=operation,
-                            prompt_tokens=0,
-                            completion_tokens=0,
-                            latency_ms=1.0,
-                            success=True,
-                            response_text=result_str,
-                            cache_metadata=create_cache_metadata(
-                                cache_hit=True,
-                                similarity_score=result.similarity
-                            ),
-                            agent_name="ResumeMatching",
-                            agent_role="analyst",
-                            conversation_id=self.memory.conversation_id if self.memory else None,
-                            turn_number=self.memory.turn_number if self.memory else None,
-                            parent_call_id=self.memory.request_id if self.memory else None,
-                            request_id=str(uuid.uuid4()),
-                            trace_id=self.memory.conversation_id if self.memory else None,
-                            environment=os.getenv("ENVIRONMENT", "development"),
-                            metadata={
-                                "phase": CURRENT_PHASE,
-                                "semantic_cache_hit": True,
-                                "similarity": result.similarity,
-                                "job_id": job.get('id'),
-                                "original_score": original_score,
-                            }
-                        )
-                        
-                        # Skip to result parsing
-                
                 # If no cache hit, proceed with LLM call
-                if not cached_result and not semantic_hit:
+                if not cached_result:
                     # ═══════════════════════════════════════════════════════════════
-                    # STEP 3: Get optimized prompt and max_tokens
+                    # STEP 3: Get optimized prompt and max_tokens (deep_analyze)
                     # ═══════════════════════════════════════════════════════════════
                     optimized_prompt, max_tokens_limit, prompt_meta = prompt_optimizer.get_optimized_prompt(
                         operation=operation,
@@ -1686,6 +1798,11 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
 
                     result_str = str(result)
 
+                    # Extract Azure cache metrics (stable_prefix category)
+                    azure_cache_metrics = extract_azure_cache_metrics(result, optimized_prompt)
+                    if azure_cache_metrics.get("cached_prompt_tokens", 0) > 0:
+                        logger.info(f"[DEEP_ANALYSIS] ✅ Azure cache hit! {azure_cache_metrics['cached_prompt_tokens']:,} tokens cached")
+
                     # DEBUG LOGGING: See what we got back
                     logger.info(f"[DEEP_ANALYSIS] === LLM RESPONSE ===")
                     logger.info(f"[DEEP_ANALYSIS] Raw response (first 500 chars):\n{result_str[:500]}")
@@ -1708,32 +1825,32 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                         completion_tokens = estimate_tokens(result_str)
 
                     # ═══════════════════════════════════════════════════════════════
-                    # STEP 7: Detect streaming candidates
+                    # STEP 7: Detect streaming candidates (deep_analyze)
                     # ═══════════════════════════════════════════════════════════════
                     streaming_candidate = streaming_detector.check_call(
                         operation=operation,
                         latency_ms=latency_ms,
                         completion_tokens=completion_tokens,
                     )
-                    
+
                     # ═══════════════════════════════════════════════════════════════
-                    # STEP 8: Cache the response
+                    # STEP 8: Cache the response (both persistent and in-memory)
                     # ═══════════════════════════════════════════════════════════════
+                    # Store in persistent cache (SQLite - survives restarts)
+                    persistent_cache.set(
+                        operation=operation,
+                        key_data=cache_key_data,
+                        value=result_str
+                    )
+                    # Also store in memory cache (faster for same-session lookups)
                     cache.set(
                         operation=operation,
                         key_data=cache_key_data,
                         value=result_str
                     )
-                    
-                    if semantic_cache:
-                        await semantic_cache.set(
-                            operation=operation,
-                            prompt=full_prompt,
-                            response=result_str
-                        )
-                    
+
                     # ═══════════════════════════════════════════════════════════════
-                    # STEP 9: Create prompt breakdown and evaluate quality
+                    # STEP 9: Create prompt breakdown and evaluate quality (deep_analyze)
                     # ═══════════════════════════════════════════════════════════════
                     prompt_breakdown = create_prompt_breakdown(
                         system_prompt=optimized_prompt,
@@ -1741,9 +1858,9 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                         user_message=user_message,
                         user_message_tokens=estimate_tokens(user_message),
                     )
-                    
-                    # LLM Judge evaluation
-                    quality_eval = await judge.maybe_evaluate(
+
+                    # LLM Judge evaluation (fire-and-forget - doesn't block response)
+                    fire_and_forget_judge(
                         operation=operation,
                         prompt=full_prompt[:5000],
                         response=result_str[:5000],
@@ -1751,7 +1868,8 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                         conversation_id=self.memory.conversation_id if self.memory else None,
                         turn_number=self.memory.turn_number if self.memory else None,
                     )
-                    
+                    quality_eval = None  # Judge runs in background
+
                     # ═══════════════════════════════════════════════════════════════
                     # STEP 10: Track with Observatory (CRITICAL - INCLUDE PHASE)
                     # ═══════════════════════════════════════════════════════════════
@@ -1795,7 +1913,10 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                         # Observability
                         trace_id=self.memory.conversation_id if self.memory else None,
                         environment=os.getenv("ENVIRONMENT", "development"),
-                        
+
+                        # Azure prompt cache metrics (stable_prefix category)
+                        **azure_cache_metrics,
+
                         # Metadata - CRITICAL: Include phase
                         metadata={
                             "phase": CURRENT_PHASE,
@@ -1806,15 +1927,35 @@ Return 10 matched bullets with EXACT TEXT from both documents."""
                             "streaming_candidate": bool(streaming_candidate),
                         }
                     )
-                    
+
                     logger.debug(f"Deep analysis LLM call: {latency_ms:.0f}ms, {prompt_tokens + completion_tokens} tokens")
+
+                    # ═══════════════════════════════════════════════════════════════
+                    # STEP 11: Track batch detection (individual call)
+                    # ═══════════════════════════════════════════════════════════════
+                    # Generate unique call ID for linking
+                    call_id = str(uuid.uuid4())
+
+                    batch_detector.track_call(
+                        operation=operation,
+                        call_id=call_id,
+                        latency_ms=latency_ms,
+                        agent_name="ResumeMatching",
+                    )
+                    
+                    # Check token efficiency (deep analysis should have good prompt/completion ratio)
+                    if completion_tokens > 0:
+                        token_efficiency_detector.check_call(
+                            operation=operation,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            call_id=call_id,
+                            agent_name="ResumeMatching",
+                        )
             
             # ═══════════════════════════════════════════════════════════════
             # RESULT PARSING (common path for all branches above)
             # ═══════════════════════════════════════════════════════════════
-            
-            # ✅ ADD THIS LINE:
-            logger.debug(f"Raw deep analysis response for {job.get('title', 'Unknown')}: {result_str[:500] if result_str else 'EMPTY'}")
 
             # Parse response
             if '```json' in result_str:

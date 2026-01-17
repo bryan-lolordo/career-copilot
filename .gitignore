@@ -27,6 +27,7 @@ __pycache__/
 
 # Data and personal files
 data/
+cache/
 documents/
 pics/
 tests/

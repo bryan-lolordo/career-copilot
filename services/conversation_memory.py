@@ -287,6 +287,114 @@ class ConversationMemory:
         
         return ConversationIntent.GENERAL_CHAT
     
+    def trim_history(
+        self,
+        chat_history,
+        max_turns: int = 10,
+        max_tokens: int = 5000,
+        preserve_system: bool = True
+    ) -> tuple:
+        """
+        Trim chat history to prevent context bloat.
+
+        Strategy:
+        - Keep system messages (always)
+        - Keep last N conversation turns
+        - Respect max token limit
+
+        Args:
+            chat_history: The ChatHistory object to trim
+            max_turns: Maximum number of conversation turns to keep (default: 10)
+            max_tokens: Maximum tokens for history (default: 5000)
+            preserve_system: Always keep system messages (default: True)
+
+        Returns:
+            Tuple of (trimmed_chat_history, messages_removed, tokens_saved)
+        """
+        from observatory_config import estimate_tokens
+        from semantic_kernel.contents.chat_history import ChatHistory
+
+        if not chat_history or not hasattr(chat_history, 'messages'):
+            return chat_history, 0, 0
+
+        messages = chat_history.messages
+        if len(messages) == 0:
+            return chat_history, 0, 0
+
+        # Separate system messages from conversation
+        system_messages = []
+        conversation_messages = []
+
+        for msg in messages:
+            role = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
+            if role.lower() in ['system', 'developer']:
+                system_messages.append(msg)
+            else:
+                conversation_messages.append(msg)
+
+        # If no conversation yet, nothing to trim
+        if len(conversation_messages) == 0:
+            return chat_history, 0, 0
+
+        original_count = len(conversation_messages)
+        tokens_removed = 0
+
+        # STEP 1: Limit by turn count (keep last max_turns)
+        # A "turn" = 1 user message + 1 assistant message
+        # Keep last max_turns * 2 messages (user + assistant pairs)
+        max_messages = max_turns * 2
+        if len(conversation_messages) > max_messages:
+            # Calculate tokens being removed by turn limit
+            messages_to_remove = conversation_messages[:-max_messages]
+            for msg in messages_to_remove:
+                content = str(msg.content) if hasattr(msg, 'content') else ''
+                tokens_removed += estimate_tokens(content)
+            conversation_messages = conversation_messages[-max_messages:]
+
+        # STEP 2: Limit by token count
+        # Calculate tokens for remaining conversation
+        total_tokens = 0
+        for msg in conversation_messages:
+            content = str(msg.content) if hasattr(msg, 'content') else ''
+            total_tokens += estimate_tokens(content)
+
+        # If over limit, remove oldest messages until under limit
+        while total_tokens > max_tokens and len(conversation_messages) > 2:
+            # Remove oldest message (index 0)
+            oldest = conversation_messages.pop(0)
+            oldest_content = str(oldest.content) if hasattr(oldest, 'content') else ''
+            oldest_tokens = estimate_tokens(oldest_content)
+            total_tokens -= oldest_tokens
+            tokens_removed += oldest_tokens
+
+        # Calculate stats
+        total_removed = original_count - len(conversation_messages)
+
+        # If nothing was removed, return original history unchanged
+        if total_removed == 0:
+            return chat_history, 0, 0
+
+        # STEP 3: Rebuild chat history only if we removed something
+        new_history = ChatHistory()
+
+        # Add system messages first (always preserved)
+        if preserve_system:
+            for msg in system_messages:
+                new_history.messages.append(msg)
+
+        # Add trimmed conversation
+        for msg in conversation_messages:
+            new_history.messages.append(msg)
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"✂️  Trimmed chat history: {total_removed} messages removed "
+            f"(~{tokens_removed:,} tokens saved)"
+        )
+
+        return new_history, total_removed, tokens_removed
+    
     def _get_context_snapshot(self) -> Dict[str, Any]:
         """Get current context as a dictionary"""
         return {

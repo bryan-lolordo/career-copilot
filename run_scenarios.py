@@ -223,7 +223,7 @@ class ScenarioRunner:
             print(f"    {s['description']}")
             print(f"    {len(s['conversation'])} turns\n")
     
-    async def run_scenario(self, scenario: Dict, dry_run: bool = False) -> Dict:
+    async def run_scenario(self, scenario: Dict, dry_run: bool = False, phase: str = "baseline") -> Dict:
         """
         Run a single scenario through the chatbot.
         
@@ -327,13 +327,14 @@ class ScenarioRunner:
                 try:
                     # Use the same pattern as chatbot.py with full tracking
                     response = await self._execute_turn(
-                        kernel, 
-                        chat_completion, 
+                        kernel,
+                        chat_completion,
                         history,
                         execution_settings,
                         user_input,
                         memory,
                         SYSTEM_PROMPT,
+                        phase=phase,
                     )
                     
                     latency_ms = (time.time() - turn_start) * 1000
@@ -366,46 +367,90 @@ class ScenarioRunner:
         return result
     
     async def _execute_turn(
-        self, 
-        kernel, 
+        self,
+        kernel,
         chat_completion,
         history,
         execution_settings,
         user_input: str,
         memory,
         system_prompt: str,
+        phase: str = "baseline",
     ) -> str:
         """
-        Execute a single turn through the chatbot.
-        Tracks the main orchestration call like chatbot.py does.
-        
+        Execute a single turn through the chatbot with full Observatory tracking.
+
+        Implements the 10-step optimization pattern from semantic_kernel_setup.py:
+        1. Exact cache check
+        2. Semantic cache check
+        3. Prompt optimization
+        4. Model routing
+        5. Prefix cache tracking
+        6. LLM call execution
+        7. Streaming/context/efficiency detection
+        8. Cache response storage
+        9. Quality evaluation
+        10. Observatory tracking
+
         This captures:
         - parent_call_id (request_id for linking plugin calls)
         - prompt_breakdown with full chat_history AND chat_history_count
         - conversation_id and turn_number
         - content_hash and prompt_normalized (auto by SDK)
         - Router-based complexity scoring (automatic)
+        - All detector metrics (streaming, context growth, token efficiency)
+        - Batch/sequential detection for optimization opportunities
         """
         from observatory_config import (
+            # Core tracking
             track_llm_call,
             estimate_tokens,
             classify_error,
+
+            # Optimization components
+            cache,
+            semantic_cache,
+            prefix_cache,
             router,
+            prompt_optimizer,
+            judge,
+
+            # Detectors
+            batch_detector,
+            sequential_detector,
+            streaming_detector,
+            context_growth_detector,
+            token_efficiency_detector,
+
+            # Helper functions
+            create_cache_metadata,
+
+            # Config
             DEFAULT_MODEL,
+            CURRENT_PHASE,
         )
-        from agents.semantic_kernel_setup import SYSTEM_PROMPT_VERSION
-        
-        # ⭐ Generate request_id for this turn (matches chatbot.py)
-        # This becomes parent_call_id for all plugin calls in this turn
+        from agents.semantic_kernel_setup import (
+            SYSTEM_PROMPT_VERSION,
+            extract_cache_metrics,
+            calculate_cache_savings,
+            compute_prompt_prefix_hash,
+        )
+
+        # Use passed phase or fall back to global CURRENT_PHASE
+        effective_phase = phase or CURRENT_PHASE
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 0: Generate request_id for this turn
+        # ═══════════════════════════════════════════════════════════════
         request_id = str(uuid.uuid4())
         memory.request_id = request_id
-        
+
         logger.debug(f"📤 Request ID: {request_id[:8]}...")
-        
+
         # Add user message to history
         history.add_user_message(user_input)
         memory.chat_history = history
-        
+
         # Extract messages for tracking (before LLM call)
         messages_for_breakdown = []
         for msg in history.messages:
@@ -422,21 +467,21 @@ class ScenarioRunner:
             content = msg.get('content', '')
             est_tokens = len(content) // 4
             preview = content[:80].replace('\n', ' ') + "..." if len(content) > 80 else content.replace('\n', ' ')
-            
+
             print(f"{Colors.DIM}   [{i}] {role:12s}: {len(content):6d} chars | {est_tokens:6d} est tokens{Colors.END}")
             print(f"{Colors.DIM}       Preview: {preview}{Colors.END}")
 
         # Show total
         total_chars = sum(len(msg.get('content', '')) for msg in messages_for_breakdown)
         print(f"{Colors.DIM}   Total: {total_chars} chars (~{total_chars // 4} tokens estimated){Colors.END}")
-        
+
         # ⭐ Create prompt breakdown with chat history
         prompt_breakdown = create_prompt_breakdown_from_messages(messages_for_breakdown)
-        
+
         # ⭐ Estimate tool definition tokens from kernel plugins
         tool_count = sum(len(plugin.functions) for plugin in kernel.plugins.values())
         tool_definitions_tokens = tool_count * 100  # ~100 tokens per function definition
-        
+
         # Show breakdown results including tools
         if prompt_breakdown:
             print(f"{Colors.DIM}   📊 Breakdown: sys={prompt_breakdown.system_prompt_tokens or 0}, "
@@ -444,21 +489,147 @@ class ScenarioRunner:
                   f"history={prompt_breakdown.chat_history_tokens or 0}, "
                   f"tools={tool_definitions_tokens} tokens "
                   f"({prompt_breakdown.chat_history_count or 0} messages){Colors.END}")
-            
+
         logger.debug(f"📚 Chat history: {len(history.messages)} messages")
-        
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 1: Check exact cache
+        # ═══════════════════════════════════════════════════════════════
+        operation = "scenario_chat"
+        cache_key_data = {
+            "user_message": user_input,
+            "turn": memory.turn_number,
+            "scenario_id": memory.context.test_metadata.get("scenario_id"),
+        }
+
+        cached_response, cache_meta = cache.get(
+            operation=operation,
+            key_data=cache_key_data
+        )
+
+        if cached_response:  # None in baseline, actual response in optimized
+            # Track cache hit
+            track_llm_call(
+                operation=operation,
+                agent_name="ChatAgent",
+                agent_role="orchestrator",
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=1.0,
+                success=True,
+                response_text=cached_response,
+                cache_metadata=cache_meta,
+                conversation_id=memory.conversation_id,
+                turn_number=memory.turn_number,
+                request_id=request_id,
+                metadata={
+                    "phase": effective_phase,
+                    "cache_hit": True,
+                    "cache_type": "exact",
+                    "scenario_id": memory.context.test_metadata.get("scenario_id"),
+                    "is_test": True,
+                    "system_prompt_version": SYSTEM_PROMPT_VERSION,
+                }
+            )
+
+            history.add_assistant_message(cached_response)
+            logger.info(f"✅ Exact cache hit! Skipped LLM call.")
+            return cached_response
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 2: Check semantic cache (if available)
+        # ═══════════════════════════════════════════════════════════════
+        if semantic_cache:
+            result = await semantic_cache.get(operation=operation, prompt=user_input)
+            if result.hit:
+                # Track semantic cache hit
+                track_llm_call(
+                    operation=operation,
+                    agent_name="ChatAgent",
+                    agent_role="orchestrator",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=1.0,
+                    success=True,
+                    response_text=result.response,
+                    cache_metadata=create_cache_metadata(
+                        cache_hit=True,
+                        similarity_score=result.similarity
+                    ),
+                    conversation_id=memory.conversation_id,
+                    turn_number=memory.turn_number,
+                    request_id=request_id,
+                    metadata={
+                        "phase": effective_phase,
+                        "semantic_cache_hit": True,
+                        "cache_type": "semantic",
+                        "similarity": result.similarity,
+                        "scenario_id": memory.context.test_metadata.get("scenario_id"),
+                        "is_test": True,
+                        "system_prompt_version": SYSTEM_PROMPT_VERSION,
+                    }
+                )
+
+                history.add_assistant_message(result.response)
+                logger.info(f"✅ Semantic cache hit ({result.similarity:.1%} similar)! Skipped LLM call.")
+                return result.response
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 3: Get optimized prompt and max_tokens
+        # ═══════════════════════════════════════════════════════════════
+        _, max_tokens_limit, _ = prompt_optimizer.get_optimized_prompt(
+            operation=operation,
+            default_prompt=system_prompt
+        )
+        # Override: Use original prompt to preserve Azure cache
+        optimized_prompt = system_prompt
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 4: Get routed model
+        # ═══════════════════════════════════════════════════════════════
+        estimated_prompt_tokens = sum(
+            estimate_tokens(m.get("content", ""))
+            for m in messages_for_breakdown
+        )
+
+        routed_model, routing_decision = router.select(
+            operation=operation,
+            prompt=user_input,
+            estimated_tokens=estimated_prompt_tokens,
+            complexity=None,  # Let router calculate
+        )
+
+        logger.debug(f"🧭 Routed to: {routed_model}, complexity: {routing_decision.complexity_score if routing_decision else 'N/A'}")
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 5: Track prefix for prefix caching detection
+        # ═══════════════════════════════════════════════════════════════
+        prefix_cache.track_call(
+            operation=operation,
+            system_prompt=optimized_prompt,
+            system_prompt_tokens=estimate_tokens(optimized_prompt),
+        )
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 6: Make LLM call
+        # ═══════════════════════════════════════════════════════════════
+
+        # Update execution settings with optimized values
+        if max_tokens_limit:
+            execution_settings.max_tokens = max_tokens_limit
+
         start_time = time.time()
         success = True
         error_info = None
         assistant_message = ""
         response = None
-
-        # Track TTFT for future streaming support
-        ttft_start_time = time.time()
         time_to_first_token_ms = None
+        cache_metrics = {"cached_tokens": 0, "cache_hit": False, "uncached_tokens": 0}
 
         try:
             logger.info(f"🤖 Sending request to LLM...")
+            ttft_start_time = time.time()
+
             # Get response from chat completion
             response = await chat_completion.get_chat_message_content(
                 chat_history=history,
@@ -475,7 +646,7 @@ class ScenarioRunner:
 
         except Exception as e:
             success = False
-            error_info = classify_error(e, operation="scenario_chat")
+            error_info = classify_error(e, operation=operation)
             assistant_message = f"Error: {str(e)}"
             logger.error(f"💥 LLM error: {type(e).__name__}: {str(e)[:100]}")
             raise  # Re-raise after tracking
@@ -487,117 +658,214 @@ class ScenarioRunner:
             history.add_assistant_message(assistant_message)
             memory.chat_history = history
 
-            # ⭐ Extract token usage if available
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 7: Extract token usage and Azure cache metrics
+            # ═══════════════════════════════════════════════════════════════
             prompt_tokens = 0
             completion_tokens = 0
 
             if success and response and hasattr(response, 'metadata') and response.metadata:
                 usage = response.metadata.get('usage')
                 if usage:
-                    # Handle both dict and CompletionUsage object
                     if hasattr(usage, 'prompt_tokens'):
                         prompt_tokens = usage.prompt_tokens or 0
                         completion_tokens = usage.completion_tokens or 0
                     elif isinstance(usage, dict):
                         prompt_tokens = usage.get('prompt_tokens', 0)
                         completion_tokens = usage.get('completion_tokens', 0)
-            
+
             # Estimate if not available from response
             if not prompt_tokens:
-                prompt_tokens = sum(
-                    estimate_tokens(m.get("content", "")) 
-                    for m in messages_for_breakdown
-                )
+                prompt_tokens = estimated_prompt_tokens
             if not completion_tokens:
                 completion_tokens = estimate_tokens(assistant_message)
-            
+
             logger.debug(f"🎯 Tokens: {prompt_tokens} prompt + {completion_tokens} completion")
-            
-            # Extract ALL token breakdown fields
+
+            # Extract Azure cache metrics
+            if success and response:
+                cache_metrics = extract_cache_metrics(response)
+                if cache_metrics["cache_hit"]:
+                    savings = calculate_cache_savings(cache_metrics)
+                    logger.info(f"✅ Azure cache hit! {cache_metrics['cached_tokens']:,} tokens cached - saved ${savings['cost_saved']:.4f}")
+
+            # Extract token breakdown fields
             system_prompt_tokens = prompt_breakdown.system_prompt_tokens if prompt_breakdown else None
             user_message_tokens = prompt_breakdown.user_message_tokens if prompt_breakdown else None
             chat_history_tokens = prompt_breakdown.chat_history_tokens if prompt_breakdown else None
             chat_history_count = prompt_breakdown.chat_history_count if prompt_breakdown else None
 
-            # ⭐ Route the request (gets model + complexity automatically)
-            routed_model, routing_decision = router.select(
-                operation="chat",
-                prompt=user_input,
-                estimated_tokens=prompt_tokens,
-                complexity=None,  # Let router calculate
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 8: Detect streaming candidates
+            # ═══════════════════════════════════════════════════════════════
+            streaming_candidate = streaming_detector.check_call(
+                operation=operation,
+                latency_ms=latency_ms,
+                completion_tokens=completion_tokens,
             )
-            
-            logger.debug(f"🧭 Routed to: {routed_model}, complexity: {routing_decision.complexity_score if routing_decision else 'N/A'}")
 
-            # ⭐ Track main orchestration call (like chatbot.py does)
-            track_kwargs = {
-                "operation": "chat",
-                "agent_name": "ChatAgent",
-                "agent_role": "orchestrator",
-                "model_name": routed_model,  # Use routed model
-                "prompt": user_input,
-                "response_text": assistant_message if success else None,
-                "system_prompt": str(system_prompt)[:1000],
-                "user_message": user_input,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "latency_ms": latency_ms,
-                "success": success,
-                
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 8.5: Detect context growth and token inefficiency
+            # ═══════════════════════════════════════════════════════════════
+            context_growth_alert = None
+            token_efficiency_alert = None
+
+            if success and prompt_tokens > 0:
+                # Check for context growth (chat history bloat)
+                if chat_history_tokens and chat_history_tokens > 0:
+                    context_growth_alert = context_growth_detector.check_call(
+                        operation=operation,
+                        chat_history_tokens=chat_history_tokens,
+                        total_prompt_tokens=prompt_tokens,
+                        call_id=request_id,
+                        agent_name="ChatAgent",
+                    )
+
+                # Check for token inefficiency (high prompt/completion ratio)
+                if completion_tokens > 0:
+                    token_efficiency_alert = token_efficiency_detector.check_call(
+                        operation=operation,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        call_id=request_id,
+                        agent_name="ChatAgent",
+                    )
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 9: Cache the response (if successful)
+            # ═══════════════════════════════════════════════════════════════
+            if success:
+                cache.set(
+                    operation=operation,
+                    key_data=cache_key_data,
+                    value=assistant_message
+                )
+
+                if semantic_cache:
+                    await semantic_cache.set(
+                        operation=operation,
+                        prompt=user_input,
+                        response=assistant_message
+                    )
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 9.5: Quality evaluation (if enabled)
+            # ═══════════════════════════════════════════════════════════════
+            quality_eval = None
+            if success:
+                quality_eval = await judge.maybe_evaluate(
+                    operation=operation,
+                    prompt=user_input,
+                    response=assistant_message,
+                    llm_client=kernel,
+                )
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 10: Track with Observatory
+            # ═══════════════════════════════════════════════════════════════
+            track_llm_call(
+                # Core metrics
+                operation=operation,
+                agent_name="ChatAgent",
+                agent_role="orchestrator",
+                model_name=routed_model,
+                prompt=user_input,
+                response_text=assistant_message if success else None,
+                system_prompt=str(optimized_prompt)[:1000],
+                user_message=user_input,
+                messages=messages_for_breakdown,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                success=success,
+
                 # Conversation linking
-                "conversation_id": memory.conversation_id,
-                "turn_number": memory.turn_number,
-                "parent_call_id": None,  # Root of call tree
-                "request_id": request_id,  # For plugin calls to reference
-                
+                conversation_id=memory.conversation_id,
+                turn_number=memory.turn_number,
+                parent_call_id=None,  # Root of call tree
+                request_id=request_id,
+
                 # Prompt breakdown
-                "prompt_breakdown": prompt_breakdown,
-                "system_prompt_tokens": system_prompt_tokens,
-                "user_message_tokens": user_message_tokens,
-                "chat_history_tokens": chat_history_tokens,
-                "tool_definitions_tokens": tool_definitions_tokens,
-                "chat_history_count": chat_history_count,
-                
-                # Routing decision (includes complexity automatically)
-                "routing_decision": routing_decision,
-                
+                prompt_breakdown=prompt_breakdown,
+                system_prompt_tokens=system_prompt_tokens,
+                user_message_tokens=user_message_tokens,
+                chat_history_tokens=chat_history_tokens,
+                chat_history_count=chat_history_count,
+                tool_definitions_tokens=tool_definitions_tokens,
+
+                # Optimization tracking
+                routing_decision=routing_decision,
+                quality_evaluation=quality_eval,
+
+                # Model configuration
+                temperature=execution_settings.temperature,
+                max_tokens=execution_settings.max_tokens,
+
                 # Streaming
-                "time_to_first_token_ms": time_to_first_token_ms,
-                
+                time_to_first_token_ms=time_to_first_token_ms,
+
+                # Azure prompt cache metrics
+                cached_prompt_tokens=cache_metrics.get("cached_tokens", 0),
+                cached_token_savings=calculate_cache_savings(cache_metrics)["cost_saved"] if cache_metrics.get("cache_hit") else 0.0,
+                prompt_prefix_hash=compute_prompt_prefix_hash(optimized_prompt),
+
                 # Observability
-                "trace_id": memory.conversation_id,
-                "request_id": request_id,
-                "environment": os.getenv("ENVIRONMENT", "development"),
-                
-                # Test metadata
-                "metadata": {
+                trace_id=memory.conversation_id,
+                environment=os.getenv("ENVIRONMENT", "development"),
+
+                # Error details (if failed)
+                error=assistant_message if not success else None,
+                error_type=error_info.get("error_type") if error_info else None,
+                error_code=error_info.get("error_code") if error_info else None,
+
+                # Metadata - includes phase and all test info
+                metadata={
+                    "phase": effective_phase,
                     "scenario_id": memory.context.test_metadata.get("scenario_id"),
                     "expected_tools": memory.context.test_metadata.get("expected_tools"),
                     "is_test": True,
                     "test_dataset_id": f"scenario_{memory.context.test_metadata.get('scenario_id')}",
                     "system_prompt_version": SYSTEM_PROMPT_VERSION,
+                    # Quality eval info
+                    "judged": quality_eval is not None,
+                    # Detector alerts
+                    "streaming_candidate": streaming_candidate is not None,
+                    "context_growth_alert": context_growth_alert is not None,
+                    "token_efficiency_alert": token_efficiency_alert is not None,
+                    # Azure cache metrics
+                    "azure_cache_hit": cache_metrics.get("cache_hit", False),
+                    "azure_cached_tokens": cache_metrics.get("cached_tokens", 0),
+                    "azure_uncached_tokens": cache_metrics.get("uncached_tokens", 0),
                 },
-            }
-            
-            # Add error info if failed
-            if error_info:
-                track_kwargs["error"] = assistant_message
-                track_kwargs["error_type"] = error_info.get("error_type")
-                track_kwargs["error_code"] = error_info.get("error_code")
-                track_kwargs["error_category"] = error_info.get("error_category")
-            
-            track_llm_call(**track_kwargs)
+            )
             logger.debug(f"💾 Tracked LLM call to Observatory")
-        
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 11: Track batch/sequential detection
+            # ═══════════════════════════════════════════════════════════════
+            batch_detector.track_call(
+                operation=operation,
+                call_id=request_id,
+                latency_ms=latency_ms,
+                agent_name="ChatAgent",
+            )
+
+            sequential_detector.track_call(
+                operation=operation,
+                call_id=request_id,
+                latency_ms=latency_ms,
+                agent_name="ChatAgent",
+            )
+
         return assistant_message
     
-    async def run_all(self, dry_run: bool = False) -> List[Dict]:
+    async def run_all(self, dry_run: bool = False, phase: str = "baseline") -> List[Dict]:
         """Run all scenarios."""
         scenarios = self.load_scenarios()
         self.results = []
-        
+
         for scenario in scenarios:
-            result = await self.run_scenario(scenario, dry_run)
+            result = await self.run_scenario(scenario, dry_run, phase)
             self.results.append(result)
             
             # Delay between scenarios
@@ -606,13 +874,13 @@ class ScenarioRunner:
         
         return self.results
     
-    async def run_by_id(self, scenario_id: str, dry_run: bool = False) -> Optional[Dict]:
+    async def run_by_id(self, scenario_id: str, dry_run: bool = False, phase: str = "baseline") -> Optional[Dict]:
         """Run a specific scenario by ID."""
         scenarios = self.load_scenarios()
-        
+
         for scenario in scenarios:
             if scenario["scenario_id"] == scenario_id:
-                result = await self.run_scenario(scenario, dry_run)
+                result = await self.run_scenario(scenario, dry_run, phase)
                 self.results = [result]
                 return result
         
@@ -652,6 +920,12 @@ async def main():
         action="store_true",
         help="Enable DEBUG level logging"
     )
+    parser.add_argument(
+        "--phase", "-p",
+        default="baseline",
+        choices=["baseline", "optimized"],
+        help="Phase for tracking (baseline=detect only, optimized=apply optimizations)"
+    )
     
     args = parser.parse_args()
     
@@ -669,14 +943,14 @@ async def main():
     print_header("🎭 Career Copilot Scenario Test Runner")
     print(f"{Colors.DIM}Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{Colors.END}")
     print(f"{Colors.DIM}Scenarios: {args.file}{Colors.END}")
-    print(f"{Colors.DIM}Observatory: Baseline tracking enabled{Colors.END}")
-    
+    print(f"{Colors.DIM}Phase: {args.phase.upper()}{Colors.END}")
+
     if args.scenario:
-        result = await runner.run_by_id(args.scenario, dry_run=args.dry_run)
+        result = await runner.run_by_id(args.scenario, dry_run=args.dry_run, phase=args.phase)
         if result:
             runner.results = [result]
     else:
-        await runner.run_all(dry_run=args.dry_run)
+        await runner.run_all(dry_run=args.dry_run, phase=args.phase)
     
     if runner.results and not args.dry_run:
         print_summary(runner.results)

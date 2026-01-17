@@ -63,13 +63,19 @@ from observatory import (
 from observatory import (
     LLMJudge,
     CacheManager,
-    PrefixCacheDetector,  
+    PersistentCacheManager,  # SQLite-backed cross-session cache
+    PrefixCacheDetector,
     ModelRouter,
     PromptManager,
-    PromptOptimizer,  
-    BatchDetector,  
-    ParallelDetector,  
-    StreamingDetector,  
+    PromptOptimizer,
+    BatchDetector,
+    ParallelDetector,
+    StreamingDetector,
+    SequentialCallDetector,
+    ContextGrowthDetector,
+    TokenEfficiencyDetector,
+    BatchProcessor,
+    ParallelExecutor,
 )
 
 # Data models (for type hints)
@@ -222,6 +228,28 @@ obs = Observatory(
 logger.info(f"✅ Observatory initialized (enabled={obs.collector.enabled})")
 
 # =============================================================================
+# CONFIGURE OPTIMIZATION TRACKER
+# =============================================================================
+# Tracks optimization impact by comparing baseline vs optimized phases.
+#
+# Automatically aggregates all calls tagged with phase='baseline' vs phase='optimized'
+# to measure cost, latency, token, and quality improvements.
+#
+# Works in both baseline and optimized phases - data is automatically tagged.
+
+from observatory import OptimizationTracker
+
+optimization_tracker = OptimizationTracker(
+    observatory=obs,
+    enabled=os.getenv("OPTIMIZATION_TRACKER_ENABLED", "true").lower() == "true",
+)
+
+logger.info(f"✅ OptimizationTracker configured (enabled={optimization_tracker.enabled})")
+if optimization_tracker.enabled:
+    logger.info(f"   Database: {optimization_tracker.db_path}")
+    logger.info(f"   Tracks phase comparisons automatically")
+
+# =============================================================================
 # CONFIGURE LLM JUDGE - CAREER COPILOT DOMAIN
 # =============================================================================
 # Quality evaluation with LLM-as-judge
@@ -230,7 +258,7 @@ logger.info(f"✅ Observatory initialized (enabled={obs.collector.enabled})")
 judge = LLMJudge(
     observatory=obs,
     
-    # Operations worth evaluating (high-value career advice outputs)
+    # Your existing operations (KEEP AS-IS)
     operations={
         "improve_bullet",
         "generate_change_report",
@@ -239,12 +267,13 @@ judge = LLMJudge(
         "critique_match",
         "streamlit_chat",
         "cli_chat_message",
+        "chat",
         "generate_sql",
         "explain_recent_match",  
         "refine_analysis", 
     },
     
-    # Operations to skip (low-value or simple)
+    # Your existing skip_operations (KEEP AS-IS)
     skip_operations={
         "job_search",
         "save_jobs",
@@ -253,34 +282,41 @@ judge = LLMJudge(
         "generate_refinements",
     },
     
-    # Sampling rate (1.0 = evaluate 100% of eligible calls)
-    sample_rate=float(os.getenv("JUDGE_SAMPLE_RATE", "1.0")),
+    # 100% sampling for both phases to ensure full quality tracking
+    sample_rate=1.0,  # Always evaluate quality
     
-    # Career advice domain criteria (must sum to 1.0)
+    # Your existing criteria (KEEP AS-IS)
     criteria={
-        "relevance": 0.25,      # How relevant is the career advice?
-        "accuracy": 0.25,       # Is the information correct?
-        "helpfulness": 0.25,    # Does it help the user's job search?
-        "professionalism": 0.15, # Is it professionally appropriate?
-        "clarity": 0.10,        # Is it clear and well-structured?
+        "relevance": 0.25,
+        "accuracy": 0.25,
+        "helpfulness": 0.25,
+        "professionalism": 0.15,
+        "clarity": 0.10,
     },
     
-    # Career Copilot domain context
+    # Your existing domain context (KEEP AS-IS)
     domain_context="career advice, resume optimization, and job matching",
     
-    # Model for judging
+    # Your existing judge model (KEEP AS-IS)
     judge_model=os.getenv("JUDGE_MODEL", DEFAULT_MODEL),
     
-    # Track judge calls in Observatory
+    # Your existing tracking setting (KEEP AS-IS)
     track_judge_calls=True,
     
-    # Enable/disable based on phase (optional: disable in baseline to save costs)
+    # Your existing enabled setting (KEEP AS-IS)
     enabled=os.getenv("JUDGE_ENABLED", "true").lower() == "true",
+    
+    # NEW: Add these 3 lines (optional but recommended)
+    min_confidence=0.7,           # ← NEW: Reject low-confidence evaluations
+    max_prompt_chars=2000,        # ← NEW: Increase from default 1000
+    max_response_chars=3000,      # ← NEW: Increase from default 1500
 )
 
 logger.info(f"✅ LLMJudge configured (enabled={judge.enabled}, sample_rate={judge.sample_rate})")
+logger.info(f"   Phase: {CURRENT_PHASE} (tracked in metadata)")  
 logger.info(f"   Evaluating: {len(judge.operations)} operations")
 logger.info(f"   Skipping: {len(judge.skip_operations)} operations")
+logger.info(f"   Min confidence: {judge.min_confidence}") 
 
 # =============================================================================
 # CONFIGURE CACHE MANAGER - CAREER COPILOT OPERATIONS
@@ -340,6 +376,53 @@ if cache.enabled:
     logger.info(f"   Default TTL: {cache.default_ttl}s, Max entries: {cache.max_entries}")
 
 # =============================================================================
+# CONFIGURE PERSISTENT CACHE - SQLite-backed cross-session caching
+# =============================================================================
+# Unlike CacheManager (in-memory), PersistentCacheManager stores data in SQLite
+# so it survives application restarts. Perfect for:
+# - Resume-job match results that shouldn't be recomputed
+# - Deep analysis results (expensive to regenerate)
+# - Any result where the same resume + job should return the same match
+#
+# Use case: User matches resume to jobs on Day 1, comes back Day 3 -
+# cached results are still available without re-running expensive LLM calls.
+
+persistent_cache = PersistentCacheManager(
+    db_path=os.getenv("PERSISTENT_CACHE_PATH", "./cache/career_copilot_cache.db"),
+    observatory=obs,
+
+    # Operations that benefit from cross-session persistence
+    operations={
+        # Match results - expensive to recompute, stable over time
+        "quick_score_job": {"ttl": 604800},  # 7 days - fast initial scoring
+        "deep_analyze_job": {"ttl": 604800},  # 7 days - detailed analysis
+
+        # Self-improving match iterations - valuable to keep
+        "deep_analyze_with_guidance": {"ttl": 604800},  # 7 days
+        "refine_analysis": {"ttl": 604800},  # 7 days
+        "critique_match": {"ttl": 604800},  # 7 days
+    },
+
+    # Defaults
+    default_ttl=604800,  # 7 days default for persistent cache
+    max_entries=int(os.getenv("PERSISTENT_CACHE_MAX_ENTRIES", "5000")),
+
+    # Enable based on environment
+    enabled=os.getenv("PERSISTENT_CACHE_ENABLED", "true").lower() == "true",
+
+    # Detection-only mode for baseline (same pattern as CacheManager)
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ PersistentCacheManager configured (enabled={persistent_cache.enabled})")
+if persistent_cache.enabled:
+    mode = "detection only (tracking opportunities)" if persistent_cache.detection_only else "active caching"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   DB path: {persistent_cache.db_path}")
+    logger.info(f"   Operations: {len(persistent_cache.operations)}")
+    logger.info(f"   Default TTL: {persistent_cache.default_ttl}s (7 days)")
+
+# =============================================================================
 # CONFIGURE PREFIX CACHE DETECTOR - AZURE/ANTHROPIC PREFIX CACHING
 # =============================================================================
 # Detects opportunities for Azure/Anthropic prefix caching (~50% cost savings on cached prefix)
@@ -386,11 +469,17 @@ if prefix_cache.enabled:
 # Requires: pip install chromadb
 # For other projects: Update operations with domain-specific similarity thresholds
 
+# Store semantic cache in Career Copilot's data folder (not in observatory package)
+SEMANTIC_CACHE_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "data", "semantic_cache")
+)
+
 # Only initialize if ChromaDB is available
 if SEMANTIC_CACHE_AVAILABLE:
     semantic_cache = SemanticCache(
         observatory=obs,
-        
+        db_path=SEMANTIC_CACHE_PATH,  # Store in project's data folder
+
         operations={
             # ═══════════════════════════════════════════════════════════════
             # HIGH VALUE - SQL Generation
@@ -747,6 +836,129 @@ if streaming_detector.enabled:
     logger.info(f"   Token threshold: {streaming_detector.token_threshold}")
 
 # =============================================================================
+# PROMPT PATTERN DETECTORS (NEW)
+# =============================================================================
+# Detects context growth and token inefficiency in prompts
+
+# Sequential Call Detector - Identifies sequential patterns over longer timeframes
+sequential_detector = SequentialCallDetector(
+    observatory=obs,
+    
+    # Look for patterns within 60 second window
+    sequence_window_s=60.0,
+    
+    # At least 5 sequential calls to qualify
+    min_sequence_count=5,
+    
+    # Monitor specific operations (None = all operations)
+    operations={"quick_score_job", "deep_analyze_job", "generate_sql"},
+    
+    # Enable in both phases
+    enabled=os.getenv("SEQUENTIAL_DETECTOR_ENABLED", "true").lower() == "true",
+    
+    # Detection-only mode for baseline
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ SequentialCallDetector configured (enabled={sequential_detector.enabled})")
+if sequential_detector.enabled:
+    mode = "detection only (tracking patterns)" if sequential_detector.detection_only else "implementation ready"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Sequence window: {sequential_detector.sequence_window_s}s")
+    logger.info(f"   Min sequence count: {sequential_detector.min_sequence_count}")
+
+# =============================================================================
+# UNIVERSAL BATCH + PARALLEL EXECUTION
+# =============================================================================
+# Execute batching and parallel processing with automatic Observatory tracking
+
+batch_processor = BatchProcessor(
+    observatory=obs,
+    
+    # Default batch size (can override per operation)
+    default_batch_size=3,
+    
+    # Track batch creation
+    track_batching=True,
+    
+    # Enable in both phases
+    enabled=os.getenv("BATCH_PROCESSOR_ENABLED", "true").lower() == "true",
+)
+
+logger.info(f"✅ BatchProcessor configured (enabled={batch_processor.enabled})")
+logger.info(f"   Default batch size: {batch_processor.default_batch_size}")
+logger.info(f"   Universal batching available for all operations")
+
+parallel_executor = ParallelExecutor(
+    observatory=obs,
+    
+    # Default concurrency limit
+    default_max_concurrent=3,
+    
+    # Semaphore type: 'count' (fixed limit) or 'rate' (requests/second)
+    semaphore_type='count',
+    
+    # Track parallel execution
+    track_parallelism=True,
+    
+    # Enable in both phases
+    enabled=os.getenv("PARALLEL_EXECUTOR_ENABLED", "true").lower() == "true",
+)
+
+logger.info(f"✅ ParallelExecutor configured (enabled={parallel_executor.enabled})")
+logger.info(f"   Default concurrency: {parallel_executor.default_max_concurrent}")
+logger.info(f"   Semaphore type: {parallel_executor.semaphore_type}")
+logger.info(f"   Universal parallel execution available for all operations")
+
+# Context Growth Detector - Detects when chat history grows too large
+context_growth_detector = ContextGrowthDetector(
+    observatory=obs,
+    
+    # Alert when history > 50% of total prompt
+    threshold_percentage=50.0,
+    
+    # Monitor chat operations (None = all operations)
+    operations={"streamlit_chat", "cli_chat_message"},
+    
+    # Enable in both phases
+    enabled=os.getenv("CONTEXT_GROWTH_DETECTOR_ENABLED", "true").lower() == "true",
+    
+    # Detection-only mode for baseline
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ ContextGrowthDetector configured (enabled={context_growth_detector.enabled})")
+if context_growth_detector.enabled:
+    mode = "detection only (tracking growth)" if context_growth_detector.detection_only else "context limiting ready"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Threshold: {context_growth_detector.threshold_percentage}%")
+    logger.info(f"   Monitored operations: {len(context_growth_detector.operations) if context_growth_detector.operations else 'all'}")
+
+# Token Efficiency Detector - Detects inefficient token usage patterns
+token_efficiency_detector = TokenEfficiencyDetector(
+    observatory=obs,
+    
+    # Alert when prompt/completion ratio > 50:1
+    threshold_ratio=50.0,
+    
+    # Monitor specific operations (None = all operations)
+    operations={"streamlit_chat", "cli_chat_message", "deep_analyze_job"},
+    
+    # Enable in both phases
+    enabled=os.getenv("TOKEN_EFFICIENCY_DETECTOR_ENABLED", "true").lower() == "true",
+    
+    # Detection-only mode for baseline
+    detection_only=(CURRENT_PHASE == "baseline"),
+)
+
+logger.info(f"✅ TokenEfficiencyDetector configured (enabled={token_efficiency_detector.enabled})")
+if token_efficiency_detector.enabled:
+    mode = "detection only (tracking inefficiency)" if token_efficiency_detector.detection_only else "compression ready"
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Threshold ratio: {token_efficiency_detector.threshold_ratio}:1")
+    logger.info(f"   Monitored operations: {len(token_efficiency_detector.operations) if token_efficiency_detector.operations else 'all'}")
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
@@ -867,6 +1079,69 @@ def classify_error(error: Exception, operation: str = None) -> dict:
             "error_type": error_type,
             "error_code": "UNKNOWN",
         }
+
+
+def extract_azure_cache_metrics(response, system_prompt: str = None, prefix_length: int = 500) -> dict:
+    """
+    Extract Azure prompt cache metrics from an LLM response.
+
+    Returns a dict ready to be spread into track_llm_call():
+        cached_prompt_tokens: int - Tokens served from Azure's prompt cache
+        cached_token_savings: float - Cost savings from cached tokens
+        prompt_prefix_hash: str - Hash for grouping by stable prefix category
+
+    Usage in plugins:
+        cache_metrics = extract_azure_cache_metrics(response, system_prompt)
+        track_llm_call(
+            ...other params...,
+            **cache_metrics,  # Spread the cache metrics
+        )
+
+    Args:
+        response: The LLM response object (Semantic Kernel ChatMessageContent, etc.)
+        system_prompt: The system prompt used (for computing prefix hash)
+        prefix_length: Characters to use for prefix hash (default: 500)
+
+    Returns:
+        Dict with cached_prompt_tokens, cached_token_savings, prompt_prefix_hash
+    """
+    import hashlib
+
+    result = {
+        "cached_prompt_tokens": 0,
+        "cached_token_savings": 0.0,
+        "prompt_prefix_hash": None,
+    }
+
+    # Extract cached tokens from response metadata
+    if response and hasattr(response, 'metadata') and response.metadata:
+        usage = response.metadata.get("usage")
+        if usage:
+            cached_tokens = 0
+
+            # Handle object format (OpenAI SDK)
+            if hasattr(usage, 'prompt_tokens_details'):
+                prompt_tokens_details = usage.prompt_tokens_details
+                if hasattr(prompt_tokens_details, 'cached_tokens'):
+                    cached_tokens = prompt_tokens_details.cached_tokens or 0
+            # Handle dict format
+            elif isinstance(usage, dict):
+                prompt_tokens_details = usage.get("prompt_tokens_details", {})
+                if isinstance(prompt_tokens_details, dict):
+                    cached_tokens = prompt_tokens_details.get("cached_tokens", 0)
+
+            if cached_tokens > 0:
+                result["cached_prompt_tokens"] = cached_tokens
+                # Azure charges 50% less for cached tokens
+                result["cached_token_savings"] = cached_tokens * 0.000003  # ~$0.003/1K saved
+
+    # Compute prefix hash for stable_prefix category grouping
+    if system_prompt:
+        prefix = system_prompt[:prefix_length] if len(system_prompt) > prefix_length else system_prompt
+        result["prompt_prefix_hash"] = hashlib.md5(prefix.encode()).hexdigest()[:16]
+
+    return result
+
 
 def extract_token_breakdown_from_messages(
     messages: List[Dict] = None,
@@ -1118,6 +1393,141 @@ def extract_model_parameters(
     return params
 
 # =============================================================================
+# FIRE-AND-FORGET JUDGE EVALUATION
+# =============================================================================
+# Runs judge evaluation in the background without blocking the main response.
+# Quality scores still get tracked to Observatory, just asynchronously.
+
+import asyncio
+from typing import Callable, Optional
+
+# Store for pending judge tasks (for cleanup/debugging if needed)
+_pending_judge_tasks: set = set()
+
+async def _run_judge_and_track(
+    judge_instance,
+    operation: str,
+    prompt: str,
+    response: str,
+    llm_client: Any,
+    conversation_id: Optional[str] = None,
+    turn_number: Optional[int] = None,
+    callback: Optional[Callable] = None,
+):
+    """Internal: Run judge evaluation and optionally call a callback with results."""
+    try:
+        quality_eval = await judge_instance.maybe_evaluate(
+            operation=operation,
+            prompt=prompt,
+            response=response,
+            llm_client=llm_client,
+            conversation_id=conversation_id,
+            turn_number=turn_number,
+        )
+        if callback and quality_eval:
+            callback(quality_eval)
+        return quality_eval
+    except Exception as e:
+        logger.warning(f"⚠️ Background judge evaluation failed for {operation}: {e}")
+        return None
+
+
+def fire_and_forget_judge(
+    operation: str,
+    prompt: str,
+    response: str,
+    llm_client: Any,
+    conversation_id: Optional[str] = None,
+    turn_number: Optional[int] = None,
+    callback: Optional[Callable] = None,
+) -> None:
+    """
+    Fire-and-forget judge evaluation - runs in background without blocking.
+
+    Usage:
+        # Instead of:
+        # quality_eval = await judge.maybe_evaluate(operation, prompt, response, llm_client)
+
+        # Do this:
+        fire_and_forget_judge(
+            operation=operation,
+            prompt=full_prompt,
+            response=result_str,
+            llm_client=self.kernel,
+            conversation_id=self.memory.conversation_id if self.memory else None,
+            turn_number=self.memory.turn_number if self.memory else None,
+        )
+        # Response returns immediately to user, judge runs in background
+
+    Args:
+        operation: The operation name (e.g., "improve_bullet", "generate_sql")
+        prompt: The full prompt sent to the LLM
+        response: The LLM's response
+        llm_client: The LLM client/kernel for the judge to use
+        conversation_id: Optional conversation ID for tracking
+        turn_number: Optional turn number for tracking
+        callback: Optional callback function that receives the quality_eval result
+    """
+    try:
+        # Get or create event loop
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop - create task won't work, fall back to sync
+            logger.debug(f"No event loop for fire-and-forget judge on {operation}")
+            return
+
+        # Create the background task
+        task = loop.create_task(
+            _run_judge_and_track(
+                judge_instance=judge,
+                operation=operation,
+                prompt=prompt,
+                response=response,
+                llm_client=llm_client,
+                conversation_id=conversation_id,
+                turn_number=turn_number,
+                callback=callback,
+            )
+        )
+
+        # Track the task (for debugging/cleanup)
+        _pending_judge_tasks.add(task)
+        task.add_done_callback(lambda t: _pending_judge_tasks.discard(t))
+
+        logger.debug(f"🔥 Fire-and-forget judge started for {operation}")
+
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to start fire-and-forget judge for {operation}: {e}")
+
+
+async def wait_for_pending_judges(timeout: float = 30.0) -> int:
+    """
+    Wait for all pending judge evaluations to complete.
+    Useful at end of test scenarios or application shutdown.
+
+    Returns:
+        Number of tasks that were pending
+    """
+    if not _pending_judge_tasks:
+        return 0
+
+    pending_count = len(_pending_judge_tasks)
+    logger.info(f"⏳ Waiting for {pending_count} pending judge evaluations...")
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*_pending_judge_tasks, return_exceptions=True),
+            timeout=timeout
+        )
+        logger.info(f"✅ All {pending_count} judge evaluations completed")
+    except asyncio.TimeoutError:
+        logger.warning(f"⚠️ Timeout waiting for judge evaluations ({len(_pending_judge_tasks)} still pending)")
+
+    return pending_count
+
+
+# =============================================================================
 # MAIN WRAPPER: track_llm_call()
 # =============================================================================
 
@@ -1325,6 +1735,12 @@ def track_llm_call(
         metadata.pop('execution_settings', None)
         metadata.pop('client', None)
         metadata.pop('chat_history', None)
+    else:
+        metadata = {} 
+
+    # AUTO-TAG: Add current phase to every call
+    metadata['phase'] = CURRENT_PHASE
+    metadata['phase_description'] = PHASE_DESCRIPTIONS[CURRENT_PHASE]
     
     # ═══════════════════════════════════════════════════════════════
     # CALL: SDK track_llm_call with all parameters
@@ -1423,6 +1839,583 @@ def track_llm_call(
     )
 
 # =============================================================================
+# TRACKED LLM CALL - CONTEXT MANAGER ABSTRACTION
+# =============================================================================
+# Encapsulates the 10-step optimization pattern into a clean async context manager.
+# Reduces ~400 lines of boilerplate per LLM call method to ~15 lines.
+#
+# Usage:
+#     async with TrackedLLMCall(
+#         operation="quick_score_job",
+#         agent_name="ResumeMatching",
+#         agent_role="analyst",
+#         complexity=0.4,
+#         cache_key={"job_id": job_id, "resume_hash": resume_hash},
+#         memory=self.memory,
+#         metadata={"job_title": job.get('title')}
+#     ) as ctx:
+#         result = await ctx.call_llm(
+#             chat_completion=self.chat_completion,
+#             system_prompt=QUICK_SCORE_PROMPT,
+#             user_message=f"Resume:\n{resume_text}\n\nJob:\n{job}",
+#             temperature=0.3,
+#             max_tokens=1500,
+#         )
+#         return self._parse_quick_score(result, job)
+
+import hashlib
+import time
+import asyncio
+from dataclasses import dataclass, field
+from typing import Callable, Union
+
+@dataclass
+class TrackedLLMCallResult:
+    """Result container from TrackedLLMCall context manager."""
+    response_text: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost: float = 0.0
+    latency_ms: float = 0
+    model_used: str = ""
+    cache_hit: bool = False
+    cache_type: str = None  # "exact" or "semantic"
+    routing_decision: RoutingDecision = None
+    quality_evaluation: QualityEvaluation = None
+    optimizations_applied: dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
+
+
+class TrackedLLMCall:
+    """
+    Async context manager that encapsulates the 10-step LLM optimization pattern.
+
+    Steps handled automatically:
+    1. Cache check (exact match via CacheManager)
+    2. Semantic cache check (similarity match via SemanticCache)
+    3. Prompt optimization (compression based on operation complexity)
+    4. Model routing (complexity-based model selection)
+    5. Prefix cache tracking (Azure/Anthropic prefix caching)
+    6. LLM call execution (via call_llm method)
+    7. Streaming detection (flag high-latency calls)
+    8. Cache response storage (save for future hits)
+    9. Quality evaluation (LLM-as-judge scoring)
+    10. Observatory tracking (full metric capture)
+
+    Attributes:
+        operation: Operation name for tracking (e.g., "quick_score_job")
+        agent_name: Name of the calling agent/plugin
+        agent_role: Role enum or string (e.g., "analyst", "coordinator")
+        complexity: Task complexity score (0.0-1.0) for routing
+        cache_key: Dict of values to generate cache key from
+        cache_ttl: Cache TTL in seconds (default from CacheManager)
+        memory: ConversationMemory instance for context extraction
+        conversation_id: ID linking related calls together
+        turn_number: Turn number in conversation
+        metadata: Additional metadata to track
+        skip_cache: Set True to bypass cache check
+        skip_quality_eval: Set True to bypass quality evaluation
+        skip_routing: Set True to use default model always
+    """
+
+    def __init__(
+        self,
+        operation: str,
+        agent_name: str = None,
+        agent_role: str = None,
+        complexity: float = 0.5,
+        phase: str = None,  # "baseline" or "optimized" for comparison tracking
+        cache_key: dict = None,
+        cache_ttl: int = None,
+        memory: Any = None,
+        conversation_id: str = None,
+        turn_number: int = None,
+        metadata: dict = None,
+        skip_cache: bool = False,
+        skip_quality_eval: bool = False,
+        skip_routing: bool = False,
+    ):
+        self.operation = operation
+        self.agent_name = agent_name
+        self.agent_role = agent_role
+        self.complexity = complexity
+        self.phase = phase
+        self.cache_key = cache_key or {}
+        self.cache_ttl = cache_ttl
+        self.memory = memory
+        self.conversation_id = conversation_id
+        self.turn_number = turn_number
+        self.metadata = metadata or {}
+        self.skip_cache = skip_cache
+        self.skip_quality_eval = skip_quality_eval
+        self.skip_routing = skip_routing
+
+        # Internal state
+        self._start_time: float = None
+        self._result: TrackedLLMCallResult = None
+        self._system_prompt: str = None
+        self._user_message: str = None
+        self._full_prompt: str = None
+        self._optimized_prompt: str = None
+        self._execution_settings: Any = None
+        self._cache_key_hash: str = None
+        self._routing_decision: RoutingDecision = None
+        self._prefix_tracked: bool = False
+        self._streaming_flagged: bool = False
+        self._error: Exception = None
+        self._quality_task: asyncio.Task = None
+
+    async def __aenter__(self) -> 'TrackedLLMCall':
+        """Enter context - start timing and check caches."""
+        self._start_time = time.perf_counter()
+        self._result = TrackedLLMCallResult()
+        self._result.optimizations_applied = {
+            "cache_checked": False,
+            "semantic_cache_checked": False,
+            "prompt_optimized": False,
+            "model_routed": False,
+            "prefix_tracked": False,
+            "streaming_flagged": False,
+            "quality_evaluated": False,
+        }
+
+        # Generate cache key hash
+        if self.cache_key:
+            key_str = f"{self.operation}:{sorted(self.cache_key.items())}"
+            self._cache_key_hash = hashlib.sha256(key_str.encode()).hexdigest()[:16]
+
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """Exit context - track the call to Observatory."""
+        latency_ms = (time.perf_counter() - self._start_time) * 1000
+        self._result.latency_ms = latency_ms
+
+        # Wait for quality evaluation if running
+        if self._quality_task and not self._quality_task.done():
+            try:
+                await asyncio.wait_for(self._quality_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.debug("Quality evaluation timed out")
+            except Exception as e:
+                logger.debug(f"Quality evaluation failed: {e}")
+
+        # Track the call regardless of success/failure
+        try:
+            await self._track_call(
+                success=(exc_type is None),
+                error=str(exc_val) if exc_val else None,
+            )
+        except Exception as track_error:
+            logger.warning(f"Failed to track LLM call: {track_error}")
+
+        # Don't suppress exceptions
+        return False
+
+    def _generate_cache_key(self, prompt: str) -> str:
+        """Generate cache key from prompt and cache_key dict."""
+        if self._cache_key_hash:
+            return f"{self.operation}:{self._cache_key_hash}:{hashlib.sha256(prompt.encode()).hexdigest()[:16]}"
+        return f"{self.operation}:{hashlib.sha256(prompt.encode()).hexdigest()[:32]}"
+
+    async def _check_exact_cache(self, prompt: str) -> Optional[str]:
+        """Step 1: Check exact match cache."""
+        if self.skip_cache or not cache.enabled:
+            return None
+
+        self._result.optimizations_applied["cache_checked"] = True
+
+        try:
+            cache_result = await cache.get(
+                operation=self.operation,
+                prompt=prompt,
+                cache_key=self._generate_cache_key(prompt),
+            )
+
+            if cache_result and cache_result.hit:
+                self._result.cache_hit = True
+                self._result.cache_type = "exact"
+                self._result.metadata["cache_key"] = cache_result.key
+                return cache_result.response
+        except Exception as e:
+            logger.debug(f"Cache check failed: {e}")
+
+        return None
+
+    async def _check_semantic_cache(self, prompt: str) -> Optional[str]:
+        """Step 2: Check semantic similarity cache."""
+        if self.skip_cache or not semantic_cache or not semantic_cache.enabled:
+            return None
+
+        self._result.optimizations_applied["semantic_cache_checked"] = True
+
+        try:
+            sem_result = await semantic_cache.get(
+                operation=self.operation,
+                prompt=prompt,
+            )
+
+            if sem_result and sem_result.hit:
+                self._result.cache_hit = True
+                self._result.cache_type = "semantic"
+                self._result.metadata["semantic_similarity"] = sem_result.similarity
+                return sem_result.response
+        except Exception as e:
+            logger.debug(f"Semantic cache check failed: {e}")
+
+        return None
+
+    def _optimize_prompt(self, system_prompt: str, user_message: str) -> tuple:
+        """Step 3: Optimize prompt based on operation complexity."""
+        if not prompt_optimizer.enabled:
+            return system_prompt, user_message, None
+
+        self._result.optimizations_applied["prompt_optimized"] = True
+
+        try:
+            result = prompt_optimizer.get_optimized_prompt(
+                operation=self.operation,
+                default_prompt=system_prompt,
+            )
+
+            optimized_system = result.get("prompt", system_prompt)
+            max_tokens = result.get("max_tokens")
+
+            self._result.metadata["prompt_variant"] = result.get("variant", "default")
+            self._result.metadata["prompt_savings"] = result.get("savings", {})
+
+            return optimized_system, user_message, max_tokens
+        except Exception as e:
+            logger.debug(f"Prompt optimization failed: {e}")
+            return system_prompt, user_message, None
+
+    def _route_model(self, estimated_tokens: int = None) -> str:
+        """Step 4: Route to optimal model based on complexity."""
+        if self.skip_routing or not router.enabled:
+            self._result.model_used = DEFAULT_MODEL
+            return DEFAULT_MODEL
+
+        self._result.optimizations_applied["model_routed"] = True
+
+        try:
+            self._routing_decision = router.select(
+                operation=self.operation,
+                complexity=self.complexity,
+                estimated_tokens=estimated_tokens,
+            )
+
+            self._result.model_used = self._routing_decision.selected_model
+            self._result.routing_decision = self._routing_decision
+            self._result.metadata["routing_reason"] = self._routing_decision.reason
+
+            return self._routing_decision.selected_model
+        except Exception as e:
+            logger.debug(f"Model routing failed: {e}")
+            self._result.model_used = DEFAULT_MODEL
+            return DEFAULT_MODEL
+
+    def _track_prefix(self, prompt: str):
+        """Step 5: Track prefix for Azure/Anthropic prefix caching."""
+        if not prefix_cache.enabled:
+            return
+
+        self._result.optimizations_applied["prefix_tracked"] = True
+        self._prefix_tracked = True
+
+        try:
+            prefix_cache.track(
+                operation=self.operation,
+                prompt=prompt,
+            )
+        except Exception as e:
+            logger.debug(f"Prefix tracking failed: {e}")
+
+    def _flag_streaming(self, latency_ms: float, output_tokens: int):
+        """Step 7: Flag for streaming if high latency or large output."""
+        if not streaming_detector.enabled:
+            return
+
+        try:
+            should_stream = streaming_detector.should_stream(
+                operation=self.operation,
+                latency_ms=latency_ms,
+                output_tokens=output_tokens,
+            )
+
+            if should_stream:
+                self._streaming_flagged = True
+                self._result.optimizations_applied["streaming_flagged"] = True
+                self._result.metadata["streaming_recommended"] = True
+        except Exception as e:
+            logger.debug(f"Streaming detection failed: {e}")
+
+    async def _cache_response(self, prompt: str, response: str):
+        """Step 8: Cache the response for future use."""
+        if self.skip_cache or not cache.enabled:
+            return
+
+        try:
+            await cache.set(
+                operation=self.operation,
+                prompt=prompt,
+                response=response,
+                cache_key=self._generate_cache_key(prompt),
+                ttl=self.cache_ttl,
+            )
+
+            # Also cache in semantic cache if available
+            if semantic_cache and semantic_cache.enabled:
+                await semantic_cache.set(
+                    operation=self.operation,
+                    prompt=prompt,
+                    response=response,
+                )
+        except Exception as e:
+            logger.debug(f"Cache storage failed: {e}")
+
+    async def _evaluate_quality(self, prompt: str, response: str) -> Optional[QualityEvaluation]:
+        """Step 9: Evaluate response quality with LLM-as-judge."""
+        if self.skip_quality_eval or not judge.enabled:
+            return None
+
+        self._result.optimizations_applied["quality_evaluated"] = True
+
+        try:
+            evaluation = await judge.maybe_evaluate(
+                operation=self.operation,
+                prompt=prompt,
+                response=response,
+                client=None,  # Judge uses its own client
+            )
+
+            if evaluation:
+                self._result.quality_evaluation = evaluation
+                self._result.metadata["quality_score"] = evaluation.overall_score
+
+            return evaluation
+        except Exception as e:
+            logger.debug(f"Quality evaluation failed: {e}")
+            return None
+
+    async def _track_call(self, success: bool, error: str = None):
+        """Step 10: Track the call to Observatory."""
+        # Build metadata
+        tracking_metadata = {
+            **self.metadata,
+            **self._result.metadata,
+            "optimizations_applied": self._result.optimizations_applied,
+        }
+
+        # Add phase to metadata for comparison tracking
+        if self.phase:
+            tracking_metadata["phase"] = self.phase
+
+        # Extract conversation context if memory provided
+        chat_history_count = None
+        if self.memory:
+            try:
+                if hasattr(self.memory, 'chat_history') and hasattr(self.memory.chat_history, 'messages'):
+                    chat_history_count = len(self.memory.chat_history.messages)
+            except Exception:
+                pass
+
+        # Track with full schema
+        track_llm_call(
+            model_name=self._result.model_used or DEFAULT_MODEL,
+            prompt_tokens=self._result.prompt_tokens,
+            completion_tokens=self._result.completion_tokens,
+            latency_ms=self._result.latency_ms,
+
+            agent_name=self.agent_name,
+            agent_role=self.agent_role,
+            operation=self.operation,
+
+            success=success,
+            error=error,
+
+            prompt=self._full_prompt,
+            response_text=self._result.response_text,
+            system_prompt=self._system_prompt,
+            user_message=self._user_message,
+
+            routing_decision=self._result.routing_decision,
+            cache_metadata=create_cache_metadata(
+                cache_hit=self._result.cache_hit,
+                cache_key=self._generate_cache_key(self._full_prompt) if self._full_prompt else None,
+                cache_type=self._result.cache_type,
+            ) if self._result.cache_hit else None,
+            quality_evaluation=self._result.quality_evaluation,
+
+            conversation_id=self.conversation_id,
+            turn_number=self.turn_number,
+            chat_history_count=chat_history_count,
+
+            temperature=getattr(self._execution_settings, 'temperature', None) if self._execution_settings else None,
+            max_tokens=getattr(self._execution_settings, 'max_tokens', None) if self._execution_settings else None,
+
+            metadata=tracking_metadata,
+
+            # Phase for baseline/optimized comparison
+            environment=self.phase,
+
+            **classify_error(self._error, self.operation) if self._error else {},
+        )
+
+    async def call_llm(
+        self,
+        chat_completion: Any,
+        system_prompt: str,
+        user_message: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1000,
+        execution_settings: Any = None,
+        chat_history: Any = None,
+    ) -> str:
+        """
+        Execute the LLM call with all optimizations applied.
+
+        This is the main method you call inside the context manager.
+        It handles steps 1-9 of the optimization pattern automatically.
+
+        Args:
+            chat_completion: Semantic Kernel chat completion service
+            system_prompt: System prompt text
+            user_message: User message text
+            temperature: LLM temperature (default 0.7)
+            max_tokens: Max output tokens (default 1000)
+            execution_settings: Optional pre-configured execution settings
+            chat_history: Optional ChatHistory for multi-turn context
+
+        Returns:
+            Response text from the LLM (or cached response)
+
+        Example:
+            async with TrackedLLMCall(operation="analyze") as ctx:
+                result = await ctx.call_llm(
+                    chat_completion=self.chat_completion,
+                    system_prompt="You are an analyst...",
+                    user_message="Analyze this data...",
+                    temperature=0.3,
+                )
+        """
+        from semantic_kernel.contents import ChatHistory
+        from semantic_kernel.connectors.ai.open_ai import AzureChatPromptExecutionSettings
+
+        self._system_prompt = system_prompt
+        self._user_message = user_message
+        self._full_prompt = f"{system_prompt}\n\n{user_message}"
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 1: Check exact match cache
+        # ═══════════════════════════════════════════════════════════════
+        cached = await self._check_exact_cache(self._full_prompt)
+        if cached:
+            self._result.response_text = cached
+            return cached
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 2: Check semantic cache
+        # ═══════════════════════════════════════════════════════════════
+        semantic_cached = await self._check_semantic_cache(self._full_prompt)
+        if semantic_cached:
+            self._result.response_text = semantic_cached
+            return semantic_cached
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 3: Optimize prompt (compression)
+        # ═══════════════════════════════════════════════════════════════
+        optimized_system, optimized_user, suggested_max_tokens = self._optimize_prompt(
+            system_prompt, user_message
+        )
+        self._optimized_prompt = f"{optimized_system}\n\n{optimized_user}"
+
+        # Use suggested max_tokens if available and lower
+        if suggested_max_tokens and suggested_max_tokens < max_tokens:
+            max_tokens = suggested_max_tokens
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 4: Route to optimal model
+        # ═══════════════════════════════════════════════════════════════
+        estimated_tokens = estimate_tokens(self._optimized_prompt)
+        selected_model = self._route_model(estimated_tokens)
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 5: Track prefix for prefix caching
+        # ═══════════════════════════════════════════════════════════════
+        self._track_prefix(optimized_system)
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 6: Execute LLM call
+        # ═══════════════════════════════════════════════════════════════
+        # Build chat history
+        history = chat_history if chat_history else ChatHistory()
+        history.add_system_message(optimized_system)
+        history.add_user_message(optimized_user)
+
+        # Build execution settings
+        if execution_settings:
+            self._execution_settings = execution_settings
+        else:
+            self._execution_settings = AzureChatPromptExecutionSettings(
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        call_start = time.perf_counter()
+
+        try:
+            response = await chat_completion.get_chat_message_content(
+                chat_history=history,
+                settings=self._execution_settings,
+            )
+
+            call_latency = (time.perf_counter() - call_start) * 1000
+            response_text = str(response.content) if response else ""
+
+            # Extract token usage from response metadata if available
+            if hasattr(response, 'metadata') and response.metadata:
+                usage = response.metadata.get('usage', {})
+                self._result.prompt_tokens = usage.get('prompt_tokens', estimate_tokens(self._optimized_prompt))
+                self._result.completion_tokens = usage.get('completion_tokens', estimate_tokens(response_text))
+            else:
+                self._result.prompt_tokens = estimate_tokens(self._optimized_prompt)
+                self._result.completion_tokens = estimate_tokens(response_text)
+
+            self._result.total_tokens = self._result.prompt_tokens + self._result.completion_tokens
+            self._result.response_text = response_text
+
+        except Exception as e:
+            self._error = e
+            raise
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 7: Flag for streaming if needed
+        # ═══════════════════════════════════════════════════════════════
+        self._flag_streaming(call_latency, self._result.completion_tokens)
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 8: Cache the response
+        # ═══════════════════════════════════════════════════════════════
+        await self._cache_response(self._full_prompt, response_text)
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 9: Evaluate quality (async, tracked for completion)
+        # ═══════════════════════════════════════════════════════════════
+        # Run quality evaluation - tracked so __aexit__ can await completion
+        self._quality_task = asyncio.create_task(
+            self._evaluate_quality(self._full_prompt, response_text)
+        )
+
+        return response_text
+
+    @property
+    def result(self) -> TrackedLLMCallResult:
+        """Access the result container with all metrics."""
+        return self._result
+
+
+# =============================================================================
 # SESSION HELPERS
 # =============================================================================
 
@@ -1491,7 +2484,7 @@ def end_session(
         except Exception as e:
             end_session(session, success=False, error=str(e))
     """
-    return obs.end_session(session, success=success, error=error, **metadata)
+    return obs.end_session(session, success=success, error=error)
 
 # =============================================================================
 # EXPORTS
@@ -1505,25 +2498,41 @@ __all__ = [
     # Observatory instance & components
     'obs',              # Main Observatory instance
     'judge',            # LLM Judge for quality evaluation
-    'cache',            # Exact match cache (CacheManager)
+    'cache',            # Exact match cache (CacheManager) - in-memory
+    'persistent_cache', # Cross-session cache (PersistentCacheManager) - SQLite
     'prefix_cache',     # Prefix cache detector (Azure/Anthropic)
     'semantic_cache',   # Semantic similarity cache (SemanticCache)
     'router',           # Model router for intelligent selection
     'prompts',          # Prompt manager for A/B testing
     'prompt_optimizer', # Prompt compression and token efficiency
+    'optimization_tracker', # Phase-based optimization tracking
+
+    # Context manager abstraction (10-step pattern)
+    'TrackedLLMCall',       # Main context manager for tracked LLM calls
+    'TrackedLLMCallResult', # Result container with metrics
     
     # Execution optimization detectors
     'batch_detector',     
     'parallel_detector',  
     'streaming_detector', 
+    'sequential_detector',
+    'context_growth_detector',
+    'token_efficiency_detector',
+
+    # Universal execution components 
+    'batch_processor',     
+    'parallel_executor',    
     
     # Main interface
     'track_llm_call',   # Main wrapper with auto-extraction
     
     # Helper functions
     'classify_error',
+    'extract_azure_cache_metrics',
     'extract_token_breakdown_from_messages',
     'extract_model_parameters',
+    'fire_and_forget_judge',
+    'wait_for_pending_judges',
     
     # Session management
     'start_session',
@@ -1550,6 +2559,9 @@ __all__ = [
     'ExperimentMetadata',
     'ErrorDetails',
     'SemanticCacheResult',
+
+    # Cache classes (for direct instantiation if needed)
+    'PersistentCacheManager',
     
     # Helper functions (re-exported from SDK for convenience)
     'create_routing_decision',
